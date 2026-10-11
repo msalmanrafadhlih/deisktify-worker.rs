@@ -1,0 +1,83 @@
+{
+  "requests": [
+    {
+      "type": "batch",
+      "batch": {
+        "steps": [
+          {
+            "stmt": {
+              "sql": "BEGIN IMMEDIATE",
+              "args": [],
+              "named_args": [],
+              "want_rows": false
+            }
+          },
+          {
+            "condition": {
+              "type": "ok",
+              "step": 0
+            },
+            "stmt": {
+              "sql": "INSERT INTO t(a) VALUES (?)",
+              "args": [
+                {
+                  "type": "integer",
+                  "value": "1"
+                }
+              ],
+              "named_args": [],
+              "want_rows": true
+            }
+          },
+          {
+            "condition": {
+              "type": "ok",
+              "step": 1
+            },
+            "stmt": {
+              "sql": "INSERT INTO t(a) VALUES (?)",
+              "args": [
+                {
+                  "type": "integer",
+                  "value": "2"
+                }
+              ],
+              "named_args": [],
+              "want_rows": true
+            }
+          },
+          {
+            "condition": {
+              "type": "ok",
+              "step": 2
+            },
+            "stmt": {
+              "sql": "COMMIT",
+              "args": [],
+              "named_args": [],
+              "want_rows": false
+            }
+          },
+          {
+            "condition": {
+              "type": "not",
+              "cond": {
+                "type": "ok",
+                "step": 3
+              }
+            },
+            "stmt": {
+              "sql": "ROLLBACK",
+              "args": [],
+              "named_args": [],
+              "want_rows": false
+            }
+          }
+        ]
+      }
+    },
+    {
+      "type": "close"
+    }
+  ]
+}

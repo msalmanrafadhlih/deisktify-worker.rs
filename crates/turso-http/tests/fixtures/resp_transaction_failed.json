@@ -1,0 +1,29 @@
+{
+  "baton": null,
+  "base_url": null,
+  "results": [
+    {
+      "type": "ok",
+      "response": {
+        "type": "batch",
+        "result": {
+          "step_results": [
+            { "cols": [], "rows": [], "affected_row_count": 0, "last_insert_rowid": null },
+            { "cols": [], "rows": [], "affected_row_count": 1, "last_insert_rowid": "1" },
+            null,
+            null,
+            { "cols": [], "rows": [], "affected_row_count": 0, "last_insert_rowid": null }
+          ],
+          "step_errors": [
+            null,
+            null,
+            { "message": "UNIQUE constraint failed: t.a", "code": "SQLITE_CONSTRAINT" },
+            null,
+            null
+          ]
+        }
+      }
+    },
+    { "type": "ok", "response": { "type": "close" } }
+  ]
+}

@@ -1,0 +1,15 @@
+[package]
+name = "turso-http"
+description = "Klien kecil untuk API HTTP Turso/libSQL (Hrana over HTTP, /v2/pipeline), tanpa runtime tertentu sehingga bisa jalan di Cloudflare Workers (wasm32)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+base64 = { workspace = true }
+
+[dev-dependencies]
+futures-executor = "0.3"

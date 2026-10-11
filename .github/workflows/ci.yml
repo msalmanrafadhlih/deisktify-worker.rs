@@ -1,0 +1,82 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  native:
+    name: fmt + clippy + test (native)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Versi harus sama dengan rust-toolchain.toml.
+      - uses: dtolnay/rust-toolchain@1.97.0
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Clippy (warning = error)
+        # Crate `api` ikut di-check di host: crate `worker` compile di sini,
+        # jadi tipe dan logika murninya terperiksa dan dites.
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace --locked
+
+  wasm:
+    name: wasm32 (target Worker sebenarnya)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@1.97.0
+        with:
+          targets: wasm32-unknown-unknown
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Clippy untuk wasm32
+        run: cargo clippy -p api --target wasm32-unknown-unknown --locked -- -D warnings
+
+      - name: Build release wasm32
+        run: cargo build -p api --target wasm32-unknown-unknown --release --locked
+
+      - name: Ukuran wasm
+        # Plan gratis Workers membatasi ukuran Worker; angka ini untuk dipantau.
+        run: ls -l target/wasm32-unknown-unknown/release/api.wasm
+
+  reference-fixtures:
+    name: fixture sesuai klien referensi Turso
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Pasang klien referensi (versi dipin, tanpa lifecycle script)
+        run: |
+          mkdir "$RUNNER_TEMP/hrana" && cd "$RUNNER_TEMP/hrana"
+          npm init -y >/dev/null
+          npm install --ignore-scripts --no-audit --no-fund @libsql/hrana-client@0.10.0
+
+      - name: Bangkitkan ulang fixture dan validasi respons
+        run: node scripts/gen_golden.mjs
+        env:
+          HRANA_CLIENT_DIR: ${{ runner.temp }}/hrana/node_modules/@libsql/hrana-client
+
+      - name: Fixture tidak boleh berubah
+        run: git diff --exit-code -- crates/turso-http/tests/fixtures

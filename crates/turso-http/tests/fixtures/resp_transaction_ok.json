@@ -1,0 +1,23 @@
+{
+  "baton": null,
+  "base_url": null,
+  "results": [
+    {
+      "type": "ok",
+      "response": {
+        "type": "batch",
+        "result": {
+          "step_results": [
+            { "cols": [], "rows": [], "affected_row_count": 0, "last_insert_rowid": null },
+            { "cols": [], "rows": [], "affected_row_count": 1, "last_insert_rowid": "1" },
+            { "cols": [], "rows": [], "affected_row_count": 1, "last_insert_rowid": "2" },
+            { "cols": [], "rows": [], "affected_row_count": 0, "last_insert_rowid": null },
+            null
+          ],
+          "step_errors": [null, null, null, null, null]
+        }
+      }
+    },
+    { "type": "ok", "response": { "type": "close" } }
+  ]
+}

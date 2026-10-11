@@ -1,0 +1,11 @@
+{
+  "baton": null,
+  "base_url": null,
+  "results": [
+    {
+      "type": "error",
+      "error": { "message": "SQLite input error: no such table: nope", "code": "SQL_PARSE_ERROR" }
+    },
+    { "type": "ok", "response": { "type": "close" } }
+  ]
+}

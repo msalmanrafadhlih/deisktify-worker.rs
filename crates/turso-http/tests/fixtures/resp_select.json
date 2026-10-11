@@ -1,0 +1,37 @@
+{
+  "baton": null,
+  "base_url": null,
+  "results": [
+    {
+      "type": "ok",
+      "response": {
+        "type": "execute",
+        "result": {
+          "cols": [
+            { "name": "i", "decltype": "INTEGER" },
+            { "name": "f", "decltype": "REAL" },
+            { "name": "t", "decltype": "TEXT" },
+            { "name": "n", "decltype": null },
+            { "name": "b", "decltype": "BLOB" }
+          ],
+          "rows": [
+            [
+              { "type": "integer", "value": "9007199254740993" },
+              { "type": "float", "value": 2.5 },
+              { "type": "text", "value": "héllo \"dunia\"" },
+              { "type": "null" },
+              { "type": "blob", "base64": "AAH/" }
+            ]
+          ],
+          "affected_row_count": 0,
+          "last_insert_rowid": null,
+          "replication_index": null,
+          "rows_read": 1,
+          "rows_written": 0,
+          "query_duration_ms": 0.12
+        }
+      }
+    },
+    { "type": "ok", "response": { "type": "close" } }
+  ]
+}

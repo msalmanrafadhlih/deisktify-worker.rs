@@ -1,0 +1,21 @@
+# Worker tquilla-api. Semua perintah wrangler dijalankan dari folder ini
+# (crates/api): `worker-build` membangun crate di folder kerja dan menulis
+# hasilnya ke ./build.
+name = "tquilla-api"
+main = "build/worker/shim.mjs"
+compatibility_date = "2026-10-01"
+
+[build]
+# Pasang sekali: cargo install worker-build --version 0.8.7 --locked
+command = "worker-build --release"
+watch_dir = "src"
+
+[vars]
+# Origin browser yang boleh memanggil API, dipisah koma. Persis: skema + host
+# (+ port), tanpa path, tanpa wildcard. Origin yang tidak valid dibuang.
+ALLOWED_ORIGINS = "https://tquilla.is-a.dev"
+
+# Rahasia JANGAN ditulis di sini. Set lewat:
+#   npx wrangler secret put TURSO_AUTH_TOKEN
+#   npx wrangler secret put TURSO_DATABASE_URL     (atau isi sebagai [vars] di sini)
+# Untuk `wrangler dev`, isi crates/api/.dev.vars (lihat .dev.vars.example).

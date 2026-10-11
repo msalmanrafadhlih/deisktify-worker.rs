@@ -1,0 +1,6 @@
+# Samakan dengan repo frontend (tquilla.is-a.dev) dan dtolnay/rust-toolchain di
+# .github/workflows/ci.yml. Naikkan sengaja, bersama-sama.
+# Target wasm32 sengaja tidak ditulis di sini: CI memasangnya lewat action.
+[toolchain]
+channel = "1.97.0"
+components = ["rustfmt", "clippy"]

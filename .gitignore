@@ -1,0 +1,15 @@
+/target/
+build/
+/node_modules/
+.wrangler/
+.devenv/
+.direnv/
+
+# Rahasia lokal: JANGAN di-commit. Contoh isinya ada di .dev.vars.example
+.dev.vars
+.env
+
+# Database SQLite lokal untuk `turso dev`
+*.db
+*.db-shm
+*.db-wal

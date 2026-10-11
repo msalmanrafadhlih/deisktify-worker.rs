@@ -1,0 +1,28 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/api-types",
+    "crates/turso-http",
+    "crates/api",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+rust-version = "1.91"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.23"
+
+api-types = { path = "crates/api-types" }
+turso-http = { path = "crates/turso-http" }
+
+# Ukuran wasm dibatasi plan Cloudflare, jadi dioptimalkan untuk ukuran.
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true

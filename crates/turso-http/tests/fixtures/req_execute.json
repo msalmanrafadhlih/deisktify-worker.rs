@@ -1,0 +1,44 @@
+{
+  "requests": [
+    {
+      "type": "execute",
+      "stmt": {
+        "sql": "SELECT ?, ?, ?, ?, ?, :name",
+        "args": [
+          {
+            "type": "integer",
+            "value": "1234567890123"
+          },
+          {
+            "type": "float",
+            "value": 2.5
+          },
+          {
+            "type": "text",
+            "value": "héllo \"dunia\" \\ \n"
+          },
+          {
+            "type": "null"
+          },
+          {
+            "type": "blob",
+            "base64": "AAH/"
+          }
+        ],
+        "named_args": [
+          {
+            "name": "name",
+            "value": {
+              "type": "text",
+              "value": "Turso"
+            }
+          }
+        ],
+        "want_rows": true
+      }
+    },
+    {
+      "type": "close"
+    }
+  ]
+}

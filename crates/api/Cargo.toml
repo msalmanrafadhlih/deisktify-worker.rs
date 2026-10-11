@@ -1,0 +1,25 @@
+[package]
+name = "api"
+description = "Worker Cloudflare (Axum via workers-rs) untuk tquilla-api."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+api-types = { workspace = true }
+turso-http = { workspace = true }
+serde_json = { workspace = true }
+worker = { version = "0.8", features = ["http"] }
+# default-features = false: tanpa tokio/hyper (tidak jalan di wasm32 Workers).
+axum = { version = "0.8", default-features = false, features = ["json", "query"] }
+tower-service = "0.3"
+console_error_panic_hook = "0.1"
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+futures-executor = "0.3"

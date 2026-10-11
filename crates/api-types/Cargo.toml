@@ -1,0 +1,14 @@
+[package]
+name = "api-types"
+description = "Tipe dan konstanta kontrak API tquilla, dipakai bersama oleh server dan frontend."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+# Sengaja hanya serde: crate ini ikut dikompilasi ke WASM di frontend.
+[dependencies]
+serde = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
