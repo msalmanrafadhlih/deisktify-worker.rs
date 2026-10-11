@@ -57,6 +57,13 @@ jobs:
         # Plan gratis Workers membatasi ukuran Worker; angka ini untuk dipantau.
         run: ls -l target/wasm32-unknown-unknown/release/api.wasm
 
+      - name: worker-build (wasm-bindgen + wasm-opt, persis seperti wrangler)
+        working-directory: crates/api
+        run: |
+          cargo install worker-build --version 0.8.7 --locked
+          worker-build --release
+          ls -l build/worker
+
   reference-fixtures:
     name: fixture sesuai klien referensi Turso
     runs-on: ubuntu-latest

@@ -21,8 +21,12 @@ in
     turso-cli # `turso dev` (database lokal), `turso db ...`
     nodejs_22 # skrip fixture (scripts/gen_golden.mjs)
     binaryen # wasm-opt, dipakai worker-build
+    worker-build
+    sqld
     git
   ];
+
+  env.WASM_OPT_BIN = "wasm-opt";
 
   scripts = {
     # Terminal 1: database lokal di port 8081 (8080 dipakai `dx serve`).
@@ -41,7 +45,6 @@ in
 
   enterShell = ''
     echo "tquilla-api dev shell"
-    echo "  pertama kali : cargo install worker-build --version 0.8.7 --locked"
     echo "  db-dev       : database lokal (turso dev)"
     echo "  api-dev      : wrangler dev"
     echo "  check-all    : fmt + clippy + test + wasm32"

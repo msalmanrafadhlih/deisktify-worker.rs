@@ -14,6 +14,7 @@ crate-type = ["cdylib", "rlib"]
 api-types = { workspace = true }
 turso-http = { workspace = true }
 serde_json = { workspace = true }
+wasm-bindgen = { workspace = true }
 worker = { version = "0.8", features = ["http"] }
 # default-features = false: tanpa tokio/hyper (tidak jalan di wasm32 Workers).
 axum = { version = "0.8", default-features = false, features = ["json", "query"] }
