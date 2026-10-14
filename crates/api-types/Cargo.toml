@@ -9,7 +9,6 @@ rust-version.workspace = true
 # Sengaja hanya serde: crate ini ikut dikompilasi ke WASM di frontend.
 [dependencies]
 serde = { workspace = true }
-wasm-bindgen = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }
