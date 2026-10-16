@@ -44,6 +44,11 @@ cargo run -p migrate -- seed                        # isi konten situs (aman diu
 cargo run -p migrate -- seed --samples              # + contoh chat dan jurnal (hanya lokal)
 ```
 
+Production tidak dimigrasi dari mesin sendiri: job `migrate` di `.github/workflows/ci.yml` menjalankannya
+saat tag `v*` di-push (lihat README utama, "Migrasi otomatis di CI"). Perintah di atas untuk lokal dan debug.
+Kalau endpoint menjawab 500 `no such table`, jalankan `status` dengan `TURSO_DATABASE_URL` yang **sama**
+dengan yang dipakai Worker: baris `pending` berarti database itu belum dimigrasi.
+
 Untuk database selain lokal, `up` dan `seed` butuh `--yes`. `--samples` ditolak di
 database non-lokal. Token tidak pernah dicetak.
 

@@ -20,3 +20,4 @@
   node --test scripts/migrations.test.mjs
   ```
 - Kerjakan tahap demi tahap sesuai README repo frontend (D1 → D8) dan centang di sana.
+- **Migrasi production lewat CI**: job `migrate` di `ci.yml` (tag `v*`, `environment: production`) menjalankan `migrate up --yes` lalu `seed --yes`. Jangan menambah `--samples` di sana. Migrasi harus kompatibel mundur dengan Worker yang sedang berjalan (job ini jalan sebelum deploy Worker).

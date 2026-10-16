@@ -1,11 +1,17 @@
 name: CI
 
+# - pull_request: cek saja (fmt, clippy, test, wasm32, fixture, SQL).
+# - push tag `v*`: cek yang sama, lalu job `migrate` menerapkan migrasi dan seed
+#   konten ke database Turso production (hanya kalau semua cek hijau).
+# - workflow_dispatch (tombol "Run workflow" di tab Actions, hanya dari `main`):
+#   sama seperti tag. Dipakai untuk menjalankan ulang migrasi tanpa tag baru.
 on:
   push:
     tags:
       - "v*"
   pull_request:
   workflow_call:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -102,3 +108,64 @@ jobs:
 
       - name: Terapkan migrasi dan seed, uji constraint
         run: node --test scripts/migrations.test.mjs
+
+  migrate:
+    name: migrasi + seed ke Turso (production)
+    needs: [native, wasm, reference-fixtures, sql]
+    # Tidak pernah jalan di pull request. `workflow_call` bukan push/dispatch,
+    # jadi tidak ikut.
+    if: >-
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) ||
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
+    runs-on: ubuntu-latest
+    # Secret boleh disimpan sebagai repository secret atau environment secret
+    # "production". Di Settings > Environments > production kamu bisa menambah
+    # "Required reviewers" kalau ingin persetujuan manual sebelum menyentuh DB.
+    environment: production
+    # Dua migrasi tidak boleh jalan bersamaan; yang kedua menunggu, bukan batal.
+    concurrency:
+      group: turso-migrate
+      cancel-in-progress: false
+    permissions:
+      contents: read
+    env:
+      # Nilainya HARUS sama dengan secret Worker (`wrangler secret put ...`),
+      # kalau tidak Worker membaca database yang berbeda dari yang dimigrasi.
+      TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
+      TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Periksa secret dan sembunyikan nama host dari log
+        # Repo ini publik, log Actions juga publik. GitHub hanya menyamarkan
+        # nilai secret persis; alat `migrate` mencetak alamat yang sudah
+        # dinormalkan (libsql:// jadi https://), jadi hostnya disamarkan sendiri.
+        run: |
+          if [ -z "$TURSO_DATABASE_URL" ] || [ -z "$TURSO_AUTH_TOKEN" ]; then
+            echo "::error::Secret TURSO_DATABASE_URL dan/atau TURSO_AUTH_TOKEN belum di-set (Settings > Secrets and variables > Actions)."
+            exit 1
+          fi
+          host="${TURSO_DATABASE_URL#*://}"
+          host="${host%%/*}"
+          host="${host##*@}"
+          host="${host%%:*}"
+          echo "::add-mask::$host"
+
+      - uses: dtolnay/rust-toolchain@1.97.0
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build alat migrate
+        run: cargo build -p migrate --release --locked
+
+      - name: Status sebelum
+        run: ./target/release/migrate status
+
+      - name: Terapkan migrasi (satu transaksi per migrasi)
+        run: ./target/release/migrate up --yes
+
+      - name: Seed konten situs (tanpa --samples; aman diulang)
+        run: ./target/release/migrate seed --yes
+
+      - name: Status sesudah (harus "up to date")
+        run: ./target/release/migrate status

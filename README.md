@@ -88,7 +88,21 @@ npx wrangler deploy
 curl -i https://tquilla-api.<subdomain-anda>.workers.dev/api/v1/health
 ```
 
-Setelah database dibuat, terapkan skema dan isi konten dari mesin sendiri (token hanya lewat environment, tidak dicetak):
+### Migrasi otomatis di CI
+
+Sejak D3, migrasi dan seed konten ke Turso production dijalankan otomatis oleh job `migrate` di `.github/workflows/ci.yml`:
+
+- **Pemicu:** push tag `v*` (setelah fmt, clippy, test, wasm32, fixture, dan uji SQL hijau), atau tombol **Run workflow** di tab Actions (hanya dari `main`). Pull request tidak pernah menyentuh database.
+- **Langkah:** `migrate status` → `migrate up --yes` → `migrate seed --yes` (tanpa `--samples`) → `migrate status` (harus "up to date"). Aman diulang: `up` hanya menerapkan migrasi baru, seed memakai `INSERT OR IGNORE`.
+- **Secret yang dibutuhkan** (Settings > Secrets and variables > Actions): `TURSO_DATABASE_URL` dan `TURSO_AUTH_TOKEN`. Nilainya harus **persis sama** dengan secret Worker; kalau beda, Worker membaca database lain daripada yang dimigrasi dan semua endpoint konten menjawab 500 `no such table`.
+- Job memakai `environment: production`; di Settings > Environments kamu bisa menambah "Required reviewers" untuk persetujuan manual. Log Actions repo publik itu publik, jadi nama host Turso disamarkan dengan `::add-mask::`.
+- **Aturan migrasi:** job ini jalan *sebelum* Worker baru di-deploy, jadi Worker lama masih berjalan di skema baru. Migrasi harus kompatibel mundur (tambah tabel/kolom, jangan hapus atau ganti nama dulu; hapus di rilis berikutnya).
+- Seed memakai `INSERT OR IGNORE`: mengubah isi `seeds/source/*.json` **tidak** memperbarui baris yang sudah ada. Mengubah konten yang sudah tayang butuh migrasi baru atau (D6) endpoint admin.
+- Deploy Worker tetap terpisah (`npx wrangler deploy` dari `crates/api`, atau D8).
+
+### Migrasi manual (debug, atau database lokal)
+
+Dari mesin sendiri (token hanya lewat environment, tidak dicetak):
 
 ```sh
 export TURSO_DATABASE_URL=libsql://tquilla-<org>.turso.io
