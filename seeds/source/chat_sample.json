@@ -1,0 +1,56 @@
+[
+  {
+    "message_id": 1,
+    "username": "Username 1",
+    "url": "https://a.is-a.dev",
+    "avatar": null,
+    "message": "Nyamuk nya Ampe kenyang dan duarr",
+    "attachment": null,
+    "timestamp": "2024-05-14T19:52:00Z"
+  },
+  {
+    "message_id": 2,
+    "username": "Username 2",
+    "url": "https://b.is-a.dev",
+    "avatar": null,
+    "message": "Enjoy ur food babyyyy lovee uuu n enjoyy watching babyyy loveee uuuuuuuu soooooo muchhhhh i loveeebuuu...",
+    "attachment": null,
+    "timestamp": "2026-08-14T19:52:00Z"
+  },
+  {
+    "message_id": 3,
+    "username": "Username 3",
+    "url": "https://z.is-a.dev",
+    "avatar": null,
+    "message": "just info biasanya anak pertama terus punya adek itu di panggil kak.",
+    "attachment": null,
+    "timestamp": "2026-09-01T19:52:00Z"
+  },
+  {
+    "message_id": 4,
+    "username": "Username 4",
+    "url": "https://o.is-a.dev",
+    "avatar": null,
+    "message": "singkat banget dah, untuk makan angkringannya juga belum udah pindah rumah aja",
+    "attachment": null,
+    "timestamp": "2026-09-09T19:52:00Z"
+  },
+  {
+    "message_id": 5,
+    "username": "Username 5",
+    "url": "https://q.is-a.dev",
+    "avatar": null,
+    "message": "booba komen km bikin makanan sahurku ikutan keluar juga karena kocak",
+    "attachment": null,
+    "timestamp": "2026-09-14T17:52:00Z"
+  },
+  {
+    "message_id": 6,
+    "username": "Username 6",
+    "url": "https://v.is-a.dev",
+    "avatar": null,
+    "message": "tidur habis sahur tapi 1 jam kemudian harus siap siap berangkat kerja...",
+    "attachment": null,
+    "timestamp": "2026-09-14T19:49:00Z"
+  }
+]

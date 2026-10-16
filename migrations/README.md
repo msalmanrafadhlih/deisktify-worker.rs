@@ -49,10 +49,10 @@ database non-lokal. Token tidak pernah dicetak.
 
 ## Seed
 
-`seeds/` dibangkitkan dari berkas JSON dummy di repo frontend (satu kali, lalu di-commit):
+`seeds/` dibangkitkan dari `seeds/source/*.json` (salinan JSON dummy yang dulu ada di repo frontend; sejak D3 frontend tidak lagi menyimpannya, jadi di sinilah sumbernya). Hasilnya di-commit:
 
 ```sh
-node scripts/gen_seed.mjs ../tquilla.is-a.dev/packages/components/data seeds
+node scripts/gen_seed.mjs   # seeds/source -> seeds
 ```
 
 - `0001_content.sql`: generations, bookmarks, radio, embience dan preset (konten situs).

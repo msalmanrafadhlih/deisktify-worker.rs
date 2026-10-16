@@ -119,3 +119,79 @@ test("accepts a normal chat message and an internal route", () => {
   db.exec("INSERT INTO generations VALUES (9, 'x', '/deisktify', '1', '2026-01-01')");
   assert.equal(count(db, "chat_messages"), 1);
 });
+
+// ---- query endpoint API (crates/api/src/queries/*.sql) di database yang sudah di-seed
+
+const query = (db, name) =>
+  db.prepare(readFileSync(join(root, "crates/api/src/queries", `${name}.sql`), "utf8")).all();
+
+function seededDb() {
+  const db = freshDb();
+  for (const s of sqlFiles("seeds")) db.exec(s.sql);
+  return db;
+}
+
+test("API queries: generations come newest first", () => {
+  const rows = query(seededDb(), "generations");
+  assert.deepEqual(rows.map((r) => r.number), [5, 4, 3, 2, 1]);
+  assert.equal(rows[0].link, "/deisktify");
+  assert.deepEqual(Object.keys(rows[0]), ["number", "label", "link", "kernel", "built_on"]);
+});
+
+test("API queries: bookmarks and embiences follow sort_order", () => {
+  const db = seededDb();
+  assert.deepEqual(query(db, "bookmarks").map((r) => r.label), ["Github", "windah basudara", "Motion IME"]);
+  const names = query(db, "embiences").map((r) => r.name);
+  assert.equal(names.length, 12);
+  assert.equal(names[0], "Rain");
+  assert.equal(names[11], "Coffee Shop");
+});
+
+test("API queries: radio hides inactive stations", () => {
+  const db = seededDb();
+  assert.equal(query(db, "radio").length, 5);
+  db.exec("UPDATE radio_stations SET is_active = 0 WHERE label = 'Jak FM'");
+  const labels = query(db, "radio").map((r) => r.label);
+  assert.equal(labels.length, 4);
+  assert.ok(!labels.includes("Jak FM"));
+  assert.deepEqual(Object.keys(query(db, "radio")[0]), [
+    "id", "label", "slogan", "stream_url", "official_link", "image_url",
+  ]);
+});
+
+test("API queries: presets keep item order, empty presets, and drop dangling items", () => {
+  const db = seededDb();
+  const group = (rows) => {
+    const out = [];
+    for (const r of rows) {
+      if (out.at(-1)?.id !== r.preset_id) out.push({ id: r.preset_id, label: r.label, ids: [] });
+      if (r.embience_id !== null) out.at(-1).ids.push(r.embience_id);
+    }
+    return out;
+  };
+  const idOf = (name) => db.prepare("SELECT id FROM embiences WHERE name = ?").get(name).id;
+
+  let presets = group(query(db, "presets"));
+  assert.deepEqual(presets.map((p) => p.label), ["Learning", "Chill", "Busy"]);
+  assert.deepEqual(presets[2].ids, [idOf("City"), idOf("Train"), idOf("Coffee Shop")]);
+
+  // preset tanpa isi tetap muncul
+  db.exec("INSERT INTO embience_presets (label, sort_order) VALUES ('Empty', 9)");
+  presets = group(query(db, "presets"));
+  assert.deepEqual(presets.at(-1), { id: presets.at(-1).id, label: "Empty", ids: [] });
+
+  // item yang menunjuk embience yang sudah hilang tidak ikut (FK sengaja dimatikan)
+  db.exec("PRAGMA foreign_keys = OFF");
+  db.exec("DELETE FROM embiences WHERE name = 'Train'");
+  presets = group(query(db, "presets"));
+  assert.ok(!presets[2].ids.includes(6));
+  assert.equal(presets[2].ids.length, 2);
+});
+
+test("API queries are bounded", () => {
+  for (const name of ["generations", "bookmarks", "radio", "embiences", "presets"]) {
+    const sql = readFileSync(join(root, "crates/api/src/queries", `${name}.sql`), "utf8");
+    assert.match(sql, /\bLIMIT\s+\d+\s*$/im, name);
+    assert.match(sql, /\bORDER BY\b/i, name);
+  }
+});

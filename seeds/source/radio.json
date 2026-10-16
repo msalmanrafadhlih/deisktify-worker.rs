@@ -1,0 +1,37 @@
+[
+  {
+    "label": "Delta FM",
+    "slogan": "Hits Terenak",
+    "url_stream": "https://n05-us.rcs.revma.com/k02rmq48kxcwv?rj-ttl=5&rj-tok=AAABnqUThoUAAqX6VpJNMeaCtg&age=18+",
+    "official_link": "https://deltafm.net/",
+    "image": "https://deltafm.net/img/coverArt.png"
+  },
+  {
+    "label": "Jak FM",
+    "slogan": "All Great Things For Your Day",
+    "url_stream": "https://wz.mari.co.id:1936/noice_jakfm/jakfm/chunklist_w644295007.m3u8",
+    "official_link": "https://jak101fm.com/",
+    "image": "https://images.noiceid.cc/catalog/content-1614529857498.jpg"
+  },
+  {
+    "label": "Prambors FM",
+    "slogan": "Indonesia No. 1 Hit Music Station",
+    "url_stream": "https://stream.rcs.revma.com/h77wwp48kxcwv?city=Bogor",
+    "official_link": "https://prambors.live/",
+    "image": "https://www.pramborsfm.com/logo.png"
+  },
+  {
+    "label": "Hard Rock FM (The Rockin Life)",
+    "slogan": "Streaming Radio Online Indonesia",
+    "url_stream": "https://stream.radiojar.com/7csmg90fuqruv?1780884834=",
+    "official_link": "https://therockinlife.com/",
+    "image": "https://assets-static.therockinlife.com/wp-content/uploads/2024/12/TRL-MUSIC-STREAM-PLAYER-JKT.jpg"
+  },
+  {
+    "label": "Gen98 FM",
+    "slogan": "Gen 987 FM! Radio No. 1 di Jakarta!",
+    "url_stream": "https://wz.mari.co.id:1936/noice_genfm/genfm/chunklist_w1051351755.m3u8",
+    "official_link": "https://gen987fm.com/",
+    "image": "https://images.noiceid.cc/catalog/content-1614529848190.jpg"
+  }
+]

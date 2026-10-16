@@ -2,7 +2,7 @@
 
 API untuk situs [tquilla.is-a.dev](https://tquilla.is-a.dev): **Axum (Rust) di Cloudflare Workers** (`workers-rs`) dengan database **Turso (libSQL)**. Frontend-nya ada di repo terpisah (Dioxus, GitHub Pages) dan hanya memakai REST + JSON.
 
-Rencana dan keputusan lengkap (D0–D8) ada di README repo frontend, bagian "Fullstack dan database". Repo ini sampai **D2 (skema dan migrasi)**: satu endpoint `GET /api/v1/health`, skema database, seed, dan runner migrasi. Belum ada endpoint data (D3).
+Rencana dan keputusan lengkap (D0–D8) ada di README repo frontend, bagian "Fullstack dan database". Repo ini sampai **D3 (endpoint baca)**: `GET /api/v1/health` dan lima endpoint konten read-only, skema database, seed, dan runner migrasi. Belum ada endpoint tulis (D4).
 
 ## Isi repo
 
@@ -10,12 +10,12 @@ Rencana dan keputusan lengkap (D0–D8) ada di README repo frontend, bagian "Ful
 | --- | --- |
 | `crates/api-types` | Kontrak API: struct serde, path, konstanta batas. **Dipakai bersama frontend** (hanya `serde`, ikut dikompilasi ke wasm32) |
 | `crates/turso-http` | Klien API HTTP Turso (`/v2/pipeline`): `execute` dan `transaction`, plus runner migrasi (`migrate`). Tanpa runtime tertentu; transport bisa diganti |
-| `crates/api` | Worker: router Axum, CORS, error JSON, `GET /api/v1/health`. Berisi `wrangler.toml` |
+| `crates/api` | Worker: router Axum, CORS, error JSON, `health`, endpoint konten (`content.rs`, `routes.rs`, `queries/*.sql`). Berisi `wrangler.toml` |
 | `crates/migrate` | CLI native `migrate status/up/seed` di atas `turso-http` (bukan bagian dari Worker) |
 | `migrations/` | Migrasi `.sql` berurutan (skema); lihat `migrations/README.md` |
 | `seeds/` | SQL seed hasil `scripts/gen_seed.mjs` (konten situs, dan contoh untuk dev) |
 | `scripts/gen_golden.mjs` | Membangkitkan/memvalidasi fixture protokol dengan klien referensi resmi Turso |
-| `scripts/gen_seed.mjs` | Membangkitkan `seeds/*.sql` dari JSON dummy repo frontend |
+| `scripts/gen_seed.mjs` | Membangkitkan `seeds/*.sql` dari `seeds/source/*.json` |
 | `scripts/migrations.test.mjs` | Menerapkan migrasi + seed di SQLite sungguhan (`node:sqlite`) dan menguji constraint |
 | `.github/workflows/ci.yml` | fmt, clippy, test (native), clippy + build wasm32, cek fixture, uji migrasi di SQLite |
 
@@ -24,6 +24,13 @@ Rencana dan keputusan lengkap (D0–D8) ada di README repo frontend, bagian "Ful
 | Method | Path | Respons |
 | --- | --- | --- |
 | GET | `/api/v1/health` | `200 {"status":"ok","version":"0.1.0","db":true}`; `503` dengan `"status":"degraded","db":false` bila database tidak terjangkau atau belum dikonfigurasi. Tidak pernah memuat pesan error internal |
+| GET | `/api/v1/generations` | `{"items":[{number,label,link,kernel,built_on}]}`, terbaru dulu. `link` = rute internal (`/deisktify`) atau `http(s)://` |
+| GET | `/api/v1/bookmarks` | `{"items":[{id,label,url}]}` menurut `sort_order` |
+| GET | `/api/v1/radio` | `{"items":[{id,label,slogan,stream_url,official_link?,image_url?}]}`, hanya stasiun aktif |
+| GET | `/api/v1/embiences` | `{"items":[{id,name,icon_url,stream_url}]}` |
+| GET | `/api/v1/presets` | `{"items":[{id,label,embience_ids:[...]}]}`; id yang tidak ada dibuang, duplikat dihapus |
+
+Endpoint konten: baris dengan URL tidak aman dibuang di server (URL opsional radio yang buruk dikosongkan), klien memeriksa ulang dengan `api_types::validate`. Respons sukses memakai `Cache-Control: public, max-age=60, stale-while-revalidate=300`; error tetap `no-store`. Database tidak terjangkau → `503` kode `unavailable`; data yang bentuknya salah → `500`. Method selain `GET` → `405`.
 
 Semua error berbentuk `{"error":{"code":"not_found","message":"Not found."}}`. Semua respons membawa `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `Cache-Control: no-store`.
 
@@ -95,23 +102,23 @@ Jangan commit token. `.dev.vars` dan `.env` sudah di-`.gitignore`.
 
 ## Dipakai oleh frontend
 
-Setelah repo ini dipush dan diberi tag `v0.1.0`, repo frontend memakai tipenya lewat git dependency:
+Setelah repo ini dipush dan diberi tag (kini `v0.2.0`, yang membawa endpoint D3), repo frontend memakai tipenya lewat git dependency:
 
 ```toml
 # packages/components/Cargo.toml (repo frontend)
-api-types = { git = "https://github.com/msalmanrafadhlih/tquilla-api", tag = "v0.1.0" }
+api-types = { git = "https://github.com/msalmanrafadhlih/deisktify-worker.rs", tag = "v0.2.0" }
 ```
 
 Perubahan yang tidak kompatibel di `api-types` = tag baru; frontend memilih kapan ikut naik.
 
 ## Yang sudah dan belum terverifikasi
 
-Sudah (dijalankan di sandbox dengan rustc 1.97.0): `cargo fmt`, `cargo clippy --workspace --all-targets --locked -D warnings` di target host, 68 test Rust (kontrak `api-types`, klien dan runner migrasi `turso-http`, CLI `migrate`, serta router/CORS/health `api` lewat `tower::oneshot`) dan 18 test node. Migrasi dan seed diterapkan di SQLite 3.45 sungguhan (Python `sqlite3` dan `node:sqlite`): skema valid, seed idempotent, CHECK menolak URL `javascript:`, avatar base64, JSON rusak, dsb. CLI `migrate` dijalankan end-to-end lewat server Hrana tiruan (skrip sementara di atas SQLite, bukan `sqld`): `up`, `seed`, jalan ulang, checksum berubah ditolak, migrasi gagal ter-rollback. Request klien Turso dicocokkan dengan keluaran encoder referensi resmi `@libsql/hrana-client` 0.10.0, dan fixture respons diterima decoder referensinya.
+Sudah (dijalankan di sandbox dengan rustc 1.97.0): `cargo fmt`, `cargo clippy --workspace --all-targets --locked -D warnings` di target host, 86 test Rust (kontrak dan validator `api-types`, klien dan runner migrasi `turso-http`, CLI `migrate`, serta router/CORS/health/konten `api` lewat `tower::oneshot` dan transport palsu) dan 23 test node (termasuk kelima query `.sql` terhadap SQLite sungguhan). Migrasi dan seed diterapkan di SQLite 3.45 sungguhan (Python `sqlite3` dan `node:sqlite`): skema valid, seed idempotent, CHECK menolak URL `javascript:`, avatar base64, JSON rusak, dsb. CLI `migrate` dijalankan end-to-end lewat server Hrana tiruan (skrip sementara di atas SQLite, bukan `sqld`): `up`, `seed`, jalan ulang, checksum berubah ditolak, migrasi gagal ter-rollback. Request klien Turso dicocokkan dengan keluaran encoder referensi resmi `@libsql/hrana-client` 0.10.0, dan fixture respons diterima decoder referensinya.
 
 **Belum:**
 - Kompilasi ke `wasm32-unknown-unknown` dan `worker-build` (sandbox tidak punya target itu; job `wasm` di CI yang pertama kali membuktikannya).
 - `wrangler dev` / `wrangler deploy`, serta tempat `worker-build` mencari crate di dalam workspace (jika gagal, pindahkan `wrangler.toml` ke root dan sesuaikan).
-- Perilaku terhadap server Turso/`turso dev` (`sqld`) sungguhan, termasuk `CREATE TABLE` dalam transaksi `BEGIN IMMEDIATE` lewat Hrana dan apakah `PRAGMA foreign_keys` menyala di sana. Server tiruan yang dipakai di sandbox hanya menafsirkan protokol seperti klien referensi. Bentuk JSON sudah cocok dengan klien referensi, tetapi tidak ada server libSQL di sandbox. Request `batch` dipakai persis seperti `@libsql/client`; dokumentasi publik Turso hanya menyebut `execute` dan `close`.
+- Migrasi dan seed sudah dicoba Moch di `turso dev` sungguhan (2026-10-16: `up`, ulangan, seed idempotent). **Belum** dicoba terhadap Turso cloud, dan kelima endpoint konten (D3) belum dijalankan terhadap `sqld`/Turso: querynya baru diuji di SQLite biasa. Server tiruan di sandbox hanya menafsirkan protokol seperti klien referensi.
 - Batas plan gratis Cloudflare (ukuran wasm, waktu CPU per request): cek angkanya di dokumentasi Cloudflare terhadap ukuran hasil build.
 - Dev shell Nix (`flake.nix`, `devenv.nix`): hanya sintaksnya yang diperiksa.
 

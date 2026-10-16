@@ -1,0 +1,94 @@
+{
+  "embiences": [
+    {
+      "embiences_id": 1,
+      "embiences_name": "Rain",
+      "embiences_icon": "https://raw.githubusercontent.com/msalmanrafadhlih/tquilla.is-a.dev/refs/heads/main/packages/components/assets/logo-rain.svg",
+      "embiences_stream": "https://r2.earth.fm/wp-content/uploads/2022/08/512334__felix-blume__light-rain-in-a-field-of-bananas-trees.mp3"
+    },
+    {
+      "embiences_id": 2,
+      "embiences_name": "Storm",
+      "embiences_icon": "https://raw.githubusercontent.com/msalmanrafadhlih/tquilla.is-a.dev/refs/heads/main/packages/components/assets/logo-storm.svg",
+      "embiences_stream": "https://r2.earth.fm/wp-content/uploads/2022/11/Storm-in-conifer-forest.mp3"
+    },
+    {
+      "embiences_id": 3,
+      "embiences_name": "Wind",
+      "embiences_icon": "https://raw.githubusercontent.com/msalmanrafadhlih/tquilla.is-a.dev/refs/heads/main/packages/components/assets/logo-wind.svg",
+      "embiences_stream": "https://r2.earth.fm/wp-content/uploads/2026/03/02-Wind-in-Grass-Mountain-Meadow-Summer-Night.mp3"
+    },
+    {
+      "embiences_id": 4,
+      "embiences_name": "Wave",
+      "embiences_icon": "https://raw.githubusercontent.com/msalmanrafadhlih/tquilla.is-a.dev/refs/heads/main/packages/components/assets/logo-wave.svg",
+      "embiences_stream": "https://r2.earth.fm/wp-content/uploads/2024/03/earth-fm_Jacob-Bentz_Waves-of-Wind.mp3"
+    },
+    {
+      "embiences_id": 5,
+      "embiences_name": "Stream",
+      "embiences_icon": "https://raw.githubusercontent.com/msalmanrafadhlih/tquilla.is-a.dev/refs/heads/main/packages/components/assets/logo-stream.svg",
+      "embiences_stream": "https://r2.earth.fm/wp-content/uploads/2022/07/earth-fm_MelissaPons_Malcata-stream.mp3"
+    },
+    {
+      "embiences_id": 6,
+      "embiences_name": "Train",
+      "embiences_icon": "https://raw.githubusercontent.com/msalmanrafadhlih/tquilla.is-a.dev/refs/heads/main/packages/components/assets/logo-train.svg",
+      "embiences_stream": "https://cdn.pixabay.com/audio/2022/03/12/audio_a7f39b960a.mp3"
+    },
+    {
+      "embiences_id": 7,
+      "embiences_name": "Summer Night",
+      "embiences_icon": "https://raw.githubusercontent.com/msalmanrafadhlih/tquilla.is-a.dev/refs/heads/main/packages/components/assets/logo-summer_night.svg",
+      "embiences_stream": "https://cdn.pixabay.com/audio/2022/02/07/audio_cfb54c4a18.mp3"
+    },
+    {
+      "embiences_id": 8,
+      "embiences_name": "Birds",
+      "embiences_icon": "https://raw.githubusercontent.com/msalmanrafadhlih/tquilla.is-a.dev/refs/heads/main/packages/components/assets/logo-birds.svg",
+      "embiences_stream": "https://cdn.pixabay.com/audio/2022/02/10/audio_7a07ee0e79.mp3"
+    },
+    {
+      "embiences_id": 9,
+      "embiences_name": "City",
+      "embiences_icon": "https://raw.githubusercontent.com/msalmanrafadhlih/tquilla.is-a.dev/refs/heads/main/packages/components/assets/logo-city.svg",
+      "embiences_stream": "https://cdn.pixabay.com/audio/2023/12/11/audio_36ea838e09.mp3"
+    },
+    {
+      "embiences_id": 10,
+      "embiences_name": "Boat",
+      "embiences_icon": "https://raw.githubusercontent.com/msalmanrafadhlih/tquilla.is-a.dev/refs/heads/main/packages/components/assets/logo-boat.svg",
+      "embiences_stream": "https://cdn.pixabay.com/audio/2022/03/09/audio_1e84fd8637.mp3"
+    },
+    {
+      "embiences_id": 11,
+      "embiences_name": "Fireplace",
+      "embiences_icon": "https://raw.githubusercontent.com/msalmanrafadhlih/tquilla.is-a.dev/refs/heads/main/packages/components/assets/logo-fireplace.svg",
+      "embiences_stream": "https://cdn.pixabay.com/audio/2022/09/10/audio_113b247b69.mp3"
+    },
+    {
+      "embiences_id": 12,
+      "embiences_name": "Coffee Shop",
+      "embiences_icon": "https://raw.githubusercontent.com/msalmanrafadhlih/tquilla.is-a.dev/refs/heads/main/packages/components/assets/logo-coffee_shop.svg",
+      "embiences_stream": "https://cdn.pixabay.com/audio/2022/03/13/audio_c62782dbc9.mp3"
+    }
+  ],
+
+  "presets": [
+    {
+      "preset_id": 1,
+      "preset_label": "Learning", 
+      "embience_list": [ "Train", "Coffee Shop" ] 
+    },
+    {
+      "preset_id": 2,
+      "preset_label": "Chill", 
+      "embience_list": [ "Summer Night", "Fireplace" ] 
+    },
+    {
+      "preset_id": 2,
+      "preset_label": "Busy", 
+      "embience_list": [ "City", "Train", "Coffee Shop" ] 
+    }
+  ]
+}

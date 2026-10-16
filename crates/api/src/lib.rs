@@ -5,14 +5,17 @@
 //! - `error` : error JSON seragam
 //! - `db`    : transport `fetch` untuk `turso-http`
 //! - `health`: `GET /api/v1/health`
+//! - `content`/`routes`: endpoint baca konten (D3): query + validasi, lalu handler
 //!
 //! Kode di crate ini harus compile ke wasm32 (tanpa tokio, tanpa thread).
 
 pub mod config;
+pub mod content;
 pub mod cors;
 pub mod db;
 pub mod error;
 pub mod health;
+pub mod routes;
 
 use std::sync::Arc;
 
@@ -27,6 +30,11 @@ pub fn app(config: Arc<Config>) -> Router {
     let origins = Arc::new(config.allowed_origins.clone());
     Router::new()
         .route(api_types::paths::HEALTH, get(health::handler))
+        .route(api_types::paths::GENERATIONS, get(routes::generations))
+        .route(api_types::paths::BOOKMARKS, get(routes::bookmarks))
+        .route(api_types::paths::RADIO, get(routes::radio))
+        .route(api_types::paths::EMBIENCES, get(routes::embiences))
+        .route(api_types::paths::PRESETS, get(routes::presets))
         .fallback(error::not_found)
         .method_not_allowed_fallback(error::method_not_allowed)
         .with_state(config)
@@ -95,6 +103,41 @@ mod tests {
             );
             assert_eq!(headers[header::CACHE_CONTROL], "no-store");
             assert_eq!(headers[header::X_CONTENT_TYPE_OPTIONS], "nosniff");
+        });
+    }
+
+    #[test]
+    fn every_content_endpoint_is_503_json_without_a_database_and_never_cached() {
+        futures_executor::block_on(async {
+            for path in [
+                api_types::paths::GENERATIONS,
+                api_types::paths::BOOKMARKS,
+                api_types::paths::RADIO,
+                api_types::paths::EMBIENCES,
+                api_types::paths::PRESETS,
+            ] {
+                let (status, headers, json) =
+                    call(req(Method::GET, path).body(Body::empty()).unwrap()).await;
+                assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{path}");
+                assert_eq!(json["error"]["code"], "unavailable", "{path}");
+                assert_eq!(headers[header::CACHE_CONTROL], "no-store", "{path}");
+
+                let (status, _, json) =
+                    call(req(Method::POST, path).body(Body::empty()).unwrap()).await;
+                assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{path}");
+                assert_eq!(json["error"]["code"], "method_not_allowed");
+            }
+        });
+    }
+
+    #[test]
+    fn all_declared_paths_are_routed() {
+        futures_executor::block_on(async {
+            for path in api_types::paths::ALL {
+                let (status, _, _) =
+                    call(req(Method::GET, path).body(Body::empty()).unwrap()).await;
+                assert_ne!(status, StatusCode::NOT_FOUND, "{path} has no route");
+            }
         });
     }
 

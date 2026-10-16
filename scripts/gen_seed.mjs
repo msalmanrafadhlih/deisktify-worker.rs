@@ -1,8 +1,11 @@
 #!/usr/bin/env node
-// Menghasilkan SQL seed dari berkas JSON dummy di repo frontend
-// (`packages/components/data/`). Sekali jalan, hasilnya di-commit di `seeds/`.
+// Menghasilkan SQL seed dari berkas JSON dummy. Hasilnya di-commit di `seeds/`.
 //
-//   node scripts/gen_seed.mjs <folder-data-frontend> [folder-keluaran=seeds]
+//   node scripts/gen_seed.mjs [folder-sumber=seeds/source] [folder-keluaran=seeds]
+//
+// Sumbernya adalah salinan berkas JSON dummy dari repo frontend (`packages/components/data/`
+// pada saat D2), disimpan di `seeds/source/` supaya seed bisa dibangkitkan ulang walau
+// berkas aslinya sudah dihapus dari frontend (D3).
 //
 // Keluaran:
 //   0001_content.sql  generations, bookmarks, radio, embience + preset
@@ -17,11 +20,7 @@
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 
-const [dataDirArg, outDirArg = "seeds"] = process.argv.slice(2);
-if (!dataDirArg) {
-  console.error("usage: node scripts/gen_seed.mjs <data-dir> [out-dir]");
-  process.exit(2);
-}
+const [dataDirArg = "seeds/source", outDirArg = "seeds"] = process.argv.slice(2);
 const dataDir = resolve(dataDirArg);
 const outDir = resolve(outDirArg);
 

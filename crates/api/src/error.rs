@@ -26,6 +26,11 @@ impl AppError {
         code: ErrorCode::MethodNotAllowed,
         message: "Method not allowed.",
     };
+    pub const UNAVAILABLE: Self = Self {
+        status: StatusCode::SERVICE_UNAVAILABLE,
+        code: ErrorCode::Unavailable,
+        message: "Service temporarily unavailable.",
+    };
     pub const INTERNAL: Self = Self {
         status: StatusCode::INTERNAL_SERVER_ERROR,
         code: ErrorCode::Internal,

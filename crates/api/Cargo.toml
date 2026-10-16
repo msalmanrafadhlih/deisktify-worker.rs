@@ -13,6 +13,7 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 api-types = { workspace = true }
 turso-http = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 worker = { version = "0.8", features = ["http"] }
 # default-features = false: tanpa tokio/hyper (tidak jalan di wasm32 Workers).
