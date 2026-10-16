@@ -9,11 +9,14 @@
 - **`api-types` hanya boleh bergantung pada `serde`** (dipakai frontend di wasm32). Menambah endpoint = tambah konstanta di `paths` dan di `paths::ALL`.
 - **Fixture protokol** (`crates/turso-http/tests/fixtures/req_*.json`) dihasilkan encoder referensi lewat `scripts/gen_golden.mjs`; jangan diedit tangan. `resp_*.json` ditulis tangan dan divalidasi decoder referensi.
 - Versi Rust dikunci di `rust-toolchain.toml`; saat menaikkannya, ubah juga `dtolnay/rust-toolchain@<versi>` di `.github/workflows/ci.yml` dan samakan dengan repo frontend.
+- **Skema = file di `migrations/`** (lihat `migrations/README.md`). Jangan mengubah migrasi yang sudah dijalankan (checksum dicek runner); buat nomor baru. Tanpa `BEGIN`/`COMMIT` di dalam file. Setiap tabel baru dapat `CHECK` untuk URL (`http(s)://`, avatar/lampiran `https://` saja) dan panjang teks. `seeds/*.sql` dibangkitkan oleh `scripts/gen_seed.mjs`, jangan diedit tangan. Query selalu pakai `ORDER BY` eksplisit dan parameter (`?`), tidak pernah menyisipkan input ke string SQL.
+- **`crates/migrate` native saja**, tidak boleh jadi dependensi `crates/api` (ureq dan TLS-nya tidak ada gunanya di Worker). Runner (`turso-http::migrate`) tetap murni dan dites dengan transport palsu.
 - **Perintah yang harus hijau sebelum commit:**
   ```sh
   cargo fmt --all -- --check
   cargo clippy --workspace --all-targets --locked -- -D warnings
   cargo test --workspace --locked
   cargo clippy -p api --target wasm32-unknown-unknown --locked -- -D warnings
+  node --test scripts/migrations.test.mjs
   ```
 - Kerjakan tahap demi tahap sesuai README repo frontend (D1 → D8) dan centang di sana.

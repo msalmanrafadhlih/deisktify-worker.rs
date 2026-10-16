@@ -1,0 +1,13 @@
+[package]
+name = "migrate"
+description = "CLI untuk menjalankan migrasi dan seed SQL ke database Turso/libSQL (lokal atau produksi) lewat turso-http. Hanya native, bukan bagian dari Worker."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+turso-http = { workspace = true }
+futures-executor = "0.3"
+ureq = "3.4.2"

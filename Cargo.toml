@@ -4,6 +4,7 @@ members = [
     "crates/api-types",
     "crates/turso-http",
     "crates/api",
+    "crates/migrate",
 ]
 
 [workspace.package]

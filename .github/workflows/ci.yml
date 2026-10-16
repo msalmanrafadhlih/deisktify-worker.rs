@@ -87,3 +87,17 @@ jobs:
 
       - name: Fixture tidak boleh berubah
         run: git diff --exit-code -- crates/turso-http/tests/fixtures
+
+  sql:
+    name: migrasi + seed di SQLite sungguhan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # node:sqlite tanpa flag butuh Node >= 22.13
+          node-version: 22
+
+      - name: Terapkan migrasi dan seed, uji constraint
+        run: node --test scripts/migrations.test.mjs

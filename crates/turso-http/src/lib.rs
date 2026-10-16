@@ -12,6 +12,7 @@
 //! referensi itu (lihat `scripts/gen_golden.mjs`).
 
 pub mod client;
+pub mod migrate;
 pub mod proto;
 
 pub use client::{Client, Error, HttpResponse, Transport};
