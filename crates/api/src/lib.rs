@@ -6,9 +6,11 @@
 //! - `db`    : transport `fetch` untuk `turso-http`
 //! - `health`: `GET /api/v1/health`
 //! - `content`/`routes`: endpoint baca konten (D3): query + validasi, lalu handler
+//! - `chat`  : Live Chat (D4a): validasi, pembatas kecepatan, baca/kirim pesan
 //!
 //! Kode di crate ini harus compile ke wasm32 (tanpa tokio, tanpa thread).
 
+pub mod chat;
 pub mod config;
 pub mod content;
 pub mod cors;
@@ -35,6 +37,10 @@ pub fn app(config: Arc<Config>) -> Router {
         .route(api_types::paths::RADIO, get(routes::radio))
         .route(api_types::paths::EMBIENCES, get(routes::embiences))
         .route(api_types::paths::PRESETS, get(routes::presets))
+        .route(
+            api_types::paths::MESSAGES,
+            get(routes::messages_get).post(routes::messages_post),
+        )
         .fallback(error::not_found)
         .method_not_allowed_fallback(error::method_not_allowed)
         .with_state(config)
@@ -223,6 +229,164 @@ mod tests {
             .await;
             assert_eq!(status, StatusCode::NO_CONTENT);
             assert!(!headers.contains_key(header::ACCESS_CONTROL_ALLOW_ORIGIN));
+        });
+    }
+
+    // ---------------------------------------------------------- Live Chat (D4a)
+
+    async fn call_with(
+        cfg: Arc<Config>,
+        req: Request<Body>,
+    ) -> (StatusCode, axum::http::HeaderMap, serde_json::Value) {
+        let res = app(cfg).oneshot(req).await.unwrap();
+        let (parts, body) = res.into_parts();
+        let bytes = to_bytes(body, 64 * 1024).await.unwrap();
+        let json = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+        (parts.status, parts.headers, json)
+    }
+
+    fn post(origin: Option<&str>, content_type: &str, body: impl Into<Body>) -> Request<Body> {
+        let mut b =
+            req(Method::POST, "/api/v1/messages").header(header::CONTENT_TYPE, content_type);
+        if let Some(o) = origin {
+            b = b.header(header::ORIGIN, o);
+        }
+        b.body(body.into()).unwrap()
+    }
+
+    const SITE: &str = "https://tquilla.is-a.dev";
+    const GOOD: &str = r#"{"username":"moch","url":"a.dev","message":"hello"}"#;
+
+    #[test]
+    fn posting_from_a_foreign_origin_is_forbidden_before_anything_else() {
+        futures_executor::block_on(async {
+            let (status, _, json) =
+                call(post(Some("https://evil.example"), "application/json", GOOD)).await;
+            assert_eq!(status, StatusCode::FORBIDDEN);
+            assert_eq!(json["error"]["code"], "forbidden");
+        });
+    }
+
+    #[test]
+    fn only_json_bodies_are_accepted_which_also_forces_a_cors_preflight() {
+        futures_executor::block_on(async {
+            for ct in [
+                "text/plain",
+                "application/x-www-form-urlencoded",
+                "multipart/form-data",
+            ] {
+                let (status, _, json) = call(post(Some(SITE), ct, GOOD)).await;
+                assert_eq!(status, StatusCode::BAD_REQUEST, "{ct}");
+                assert_eq!(json["error"]["code"], "bad_request");
+            }
+            let (status, _, _) =
+                call(post(Some(SITE), "Application/JSON; charset=utf-8", GOOD)).await;
+            assert_eq!(
+                status,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "valid body, no database"
+            );
+        });
+    }
+
+    #[test]
+    fn malformed_or_invalid_messages_are_400_with_a_safe_message() {
+        futures_executor::block_on(async {
+            for body in [
+                "",
+                "not json",
+                "[]",
+                r#"{"username":"x"}"#,
+                r#"{"username":1,"message":"x"}"#,
+            ] {
+                let (status, _, json) = call(post(Some(SITE), "application/json", body)).await;
+                assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}");
+                assert_eq!(json["error"]["code"], "bad_request");
+            }
+            for (body, needle) in [
+                (r#"{"username":" ","message":"x"}"#, "Username"),
+                (r#"{"username":"a","message":"  "}"#, "Message"),
+                (
+                    r#"{"username":"a","message":"x","url":"javascript:alert(1)"}"#,
+                    "link",
+                ),
+                (r#"{"username":"a\u0000b","message":"x"}"#, "Username"),
+            ] {
+                let (status, _, json) = call(post(Some(SITE), "application/json", body)).await;
+                assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+                let msg = json["error"]["message"].as_str().unwrap();
+                assert!(msg.contains(needle), "{msg}");
+                assert!(!msg.contains("alert"), "input must not be echoed");
+            }
+        });
+    }
+
+    #[test]
+    fn a_valid_message_without_a_database_is_503_and_a_missing_origin_is_allowed() {
+        futures_executor::block_on(async {
+            for origin in [Some(SITE), None] {
+                let (status, headers, json) = call(post(origin, "application/json", GOOD)).await;
+                assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+                assert_eq!(json["error"]["code"], "unavailable");
+                assert_eq!(headers[header::CACHE_CONTROL], "no-store");
+            }
+        });
+    }
+
+    #[test]
+    fn oversized_bodies_are_a_json_413() {
+        futures_executor::block_on(async {
+            let big = format!(r#"{{"username":"a","message":"{}"}}"#, "x".repeat(20_000));
+            let (status, _, json) = call(post(Some(SITE), "application/json", big)).await;
+            assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+            assert_eq!(json["error"]["code"], "payload_too_large");
+        });
+    }
+
+    #[test]
+    fn banned_words_from_the_configuration_reject_the_message() {
+        futures_executor::block_on(async {
+            let cfg = Arc::new(
+                Config::from_values(Some(SITE), None, None).with_chat(None, Some("Forbidden")),
+            );
+            let body = r#"{"username":"a","message":"this is f.o.r.b.i.d.d.e.n"}"#;
+            let (status, _, json) =
+                call_with(cfg, post(Some(SITE), "application/json", body)).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(json["error"]["message"], "This message was rejected.");
+        });
+    }
+
+    #[test]
+    fn listing_messages_validates_the_query_and_needs_the_database() {
+        futures_executor::block_on(async {
+            for bad in ["limit=0", "limit=101", "after=x", "after=-1"] {
+                let uri = format!("/api/v1/messages?{bad}");
+                let (status, _, json) =
+                    call(req(Method::GET, &uri).body(Body::empty()).unwrap()).await;
+                assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}");
+                assert_eq!(json["error"]["code"], "bad_request");
+            }
+            let (status, headers, _) = call(
+                req(Method::GET, "/api/v1/messages?after=3&limit=10")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(headers[header::CACHE_CONTROL], "no-store");
+        });
+    }
+
+    #[test]
+    fn messages_only_allow_get_and_post() {
+        futures_executor::block_on(async {
+            for method in [Method::PUT, Method::DELETE, Method::PATCH] {
+                let (status, _, json) =
+                    call(req(method, "/api/v1/messages").body(Body::empty()).unwrap()).await;
+                assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+                assert_eq!(json["error"]["code"], "method_not_allowed");
+            }
         });
     }
 }

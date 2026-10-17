@@ -20,12 +20,47 @@ impl std::fmt::Debug for DbConfig {
     }
 }
 
+/// Nilai rahasia yang tidak boleh ikut ter-log lewat `{:?}`.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct Secret(String);
+
+impl Secret {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for Secret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Secret(<redacted>)")
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Config {
     /// Origin browser yang boleh memanggil API (CORS). Kosong = tidak ada.
     pub allowed_origins: Vec<String>,
     /// `None` jika `TURSO_DATABASE_URL` belum diisi.
     pub db: Option<DbConfig>,
+    /// Garam untuk hash IP pembatas kecepatan chat (`RATE_LIMIT_SALT`). Kosong
+    /// tetap berfungsi, tetapi hash IP jadi lebih mudah ditebak.
+    pub rate_salt: Secret,
+    /// Kata terlarang di chat (`BANNED_WORDS`, dipisah koma), huruf kecil.
+    /// Sengaja dari konfigurasi, bukan dari repo publik.
+    pub banned_words: Vec<String>,
+}
+
+/// Daftar kata terlarang dipisah koma atau baris baru. Kosong dan terlalu
+/// panjang dibuang; paling banyak 500 kata.
+pub fn parse_banned_words(raw: &str) -> Vec<String> {
+    raw.split([',', '\n'])
+        .map(|s| s.trim().to_lowercase())
+        .filter(|s| !s.is_empty() && s.chars().count() <= 64)
+        .take(500)
+        .collect()
 }
 
 /// `https://host[:port]` atau `http://host[:port]`, tanpa path, tanpa wildcard.
@@ -66,7 +101,17 @@ impl Config {
                 url: url.to_owned(),
                 token: non_empty(db_token).map(str::to_owned),
             }),
+            rate_salt: Secret::default(),
+            banned_words: Vec::new(),
         }
+    }
+
+    /// Pengaturan Live Chat (opsional).
+    #[must_use]
+    pub fn with_chat(mut self, salt: Option<&str>, banned_words: Option<&str>) -> Self {
+        self.rate_salt = Secret::new(salt.map(str::trim).unwrap_or_default());
+        self.banned_words = banned_words.map(parse_banned_words).unwrap_or_default();
+        self
     }
 
     /// Variabel biasa dulu, lalu secret (URL database boleh disimpan sebagai
@@ -81,7 +126,10 @@ impl Config {
         let origins = text("ALLOWED_ORIGINS");
         let url = text("TURSO_DATABASE_URL");
         let token = env.secret("TURSO_AUTH_TOKEN").map(|v| v.to_string()).ok();
+        let salt = text("RATE_LIMIT_SALT");
+        let banned = text("BANNED_WORDS");
         Self::from_values(origins.as_deref(), url.as_deref(), token.as_deref())
+            .with_chat(salt.as_deref(), banned.as_deref())
     }
 }
 
@@ -112,6 +160,32 @@ mod tests {
         ] {
             assert!(parse_origins(bad).is_empty(), "{bad:?} must be dropped");
         }
+    }
+
+    #[test]
+    fn banned_words_are_trimmed_lowercased_and_bounded() {
+        assert_eq!(
+            parse_banned_words(" Foo , bar\n\nBAZ,, "),
+            ["foo", "bar", "baz"]
+        );
+        assert!(parse_banned_words("").is_empty());
+        assert!(parse_banned_words(&"x".repeat(65)).is_empty());
+        let many = (0..600)
+            .map(|i| format!("w{i}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        assert_eq!(parse_banned_words(&many).len(), 500);
+    }
+
+    #[test]
+    fn chat_settings_default_to_empty_and_the_salt_stays_out_of_debug_output() {
+        let c = Config::from_values(None, None, None);
+        assert_eq!(c.rate_salt.expose(), "");
+        assert!(c.banned_words.is_empty());
+        let c = c.with_chat(Some(" s3cret "), Some("a,b"));
+        assert_eq!(c.rate_salt.expose(), "s3cret");
+        assert_eq!(c.banned_words, ["a", "b"]);
+        assert!(!format!("{c:?}").contains("s3cret"));
     }
 
     #[test]

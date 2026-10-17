@@ -58,14 +58,18 @@ fn cell<'a>(res: &'a StmtResult, row: usize, col: &'static str) -> Result<&'a Va
     res.get(row, col).ok_or(ContentError::BadData(col))
 }
 
-fn text(res: &StmtResult, row: usize, col: &'static str) -> Result<String, ContentError> {
+pub(crate) fn text(
+    res: &StmtResult,
+    row: usize,
+    col: &'static str,
+) -> Result<String, ContentError> {
     cell(res, row, col)?
         .as_str()
         .map(str::to_owned)
         .ok_or(ContentError::BadData(col))
 }
 
-fn opt_text(
+pub(crate) fn opt_text(
     res: &StmtResult,
     row: usize,
     col: &'static str,
@@ -79,7 +83,7 @@ fn opt_text(
         .ok_or(ContentError::BadData(col))
 }
 
-fn id(res: &StmtResult, row: usize, col: &'static str) -> Result<u32, ContentError> {
+pub(crate) fn id(res: &StmtResult, row: usize, col: &'static str) -> Result<u32, ContentError> {
     cell(res, row, col)?
         .as_i64()
         .and_then(|n| u32::try_from(n).ok())

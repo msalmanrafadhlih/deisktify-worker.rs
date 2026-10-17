@@ -31,14 +31,37 @@ pub mod paths {
     /// `GET`: preset Embience beserta isinya.
     pub const PRESETS: &str = "/api/v1/presets";
 
+    /// `GET`: pesan Live Chat (`?after=<id>&limit=<n>`). `POST`: kirim pesan.
+    pub const MESSAGES: &str = "/api/v1/messages";
+
     /// Semua path; tambahkan endpoint baru di sini juga supaya test prefix mencakupnya.
-    pub const ALL: &[&str] = &[HEALTH, GENERATIONS, BOOKMARKS, RADIO, EMBIENCES, PRESETS];
+    pub const ALL: &[&str] = &[
+        HEALTH,
+        GENERATIONS,
+        BOOKMARKS,
+        RADIO,
+        EMBIENCES,
+        PRESETS,
+        MESSAGES,
+    ];
 }
 
-/// Batas yang diberlakukan server (diisi bertahap, dimulai di D4).
+/// Batas yang diberlakukan server. Klien memakainya untuk `maxlength` dan
+/// validasi awal; server tetap memeriksa ulang.
 pub mod limits {
     /// Ukuran maksimum body request JSON, dalam byte.
     pub const MAX_BODY_BYTES: usize = 16 * 1024;
+    /// Panjang nama pengguna Live Chat, dalam karakter (setelah dirapikan).
+    pub const MAX_USERNAME_CHARS: usize = 32;
+    /// Panjang pesan Live Chat, dalam karakter (setelah dirapikan).
+    pub const MAX_MESSAGE_CHARS: usize = 1000;
+    /// Jumlah baris maksimum dalam satu pesan.
+    pub const MAX_MESSAGE_LINES: usize = 20;
+    /// Panjang tautan pengirim, dalam karakter.
+    pub const MAX_LINK_CHARS: usize = 300;
+    /// Jumlah pesan default dan maksimum per `GET /messages`.
+    pub const MESSAGES_DEFAULT_LIMIT: u32 = 50;
+    pub const MESSAGES_MAX_LIMIT: u32 = 100;
 }
 
 /// Status keseluruhan layanan.
@@ -83,9 +106,75 @@ pub mod validate {
         (internal && clean(s, 2048)) || is_http_url(s)
     }
 
+    /// Menjadikan input pengguna sebuah URL `http(s)`: `a.dev` -> `https://a.dev`,
+    /// skema dijadikan huruf kecil. Input dengan skema lain (`javascript:`,
+    /// `data:`, `mailto:`, `ftp://`), berspasi, atau kosong -> `None`.
+    /// `host:port` tanpa skema (`a.dev:8080`) dianggap host.
+    pub fn normalize_url(raw: &str) -> Option<String> {
+        let t = raw.trim();
+        if t.is_empty() || t.contains(char::is_whitespace) {
+            return None;
+        }
+        let lower = t.to_ascii_lowercase();
+        let url = if lower.starts_with("https://") {
+            format!("https://{}", &t["https://".len()..])
+        } else if lower.starts_with("http://") {
+            format!("http://{}", &t["http://".len()..])
+        } else {
+            if let Some((before, after)) = t.split_once(':') {
+                let scheme_like = before.starts_with(|c: char| c.is_ascii_alphabetic())
+                    && before
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'));
+                if scheme_like && !after.starts_with(|c: char| c.is_ascii_digit()) {
+                    return None;
+                }
+            }
+            format!("https://{t}")
+        };
+        is_http_url(&url).then_some(url)
+    }
+
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn user_urls_become_http_urls_or_nothing() {
+            assert_eq!(normalize_url("a.dev").as_deref(), Some("https://a.dev"));
+            assert_eq!(
+                normalize_url("  a.dev/x ").as_deref(),
+                Some("https://a.dev/x")
+            );
+            assert_eq!(
+                normalize_url("HTTP://A.DEV").as_deref(),
+                Some("http://A.DEV")
+            );
+            assert_eq!(
+                normalize_url("https://a.dev/Path?q=1").as_deref(),
+                Some("https://a.dev/Path?q=1")
+            );
+            assert_eq!(
+                normalize_url("a.dev:8080/x").as_deref(),
+                Some("https://a.dev:8080/x")
+            );
+            for bad in [
+                "",
+                "   ",
+                "a b.dev",
+                "javascript:alert(1)",
+                "JaVaScRiPt:alert(1)",
+                "data:text/html,<b>x</b>",
+                "vbscript:x",
+                "mailto:a@b.c",
+                "ftp://a.b",
+                "//evil.example",
+                "https://",
+                "http:///x",
+            ] {
+                assert_eq!(normalize_url(bad), None, "{bad:?}");
+            }
+        }
 
         #[test]
         fn http_urls_are_checked_strictly() {
@@ -186,6 +275,185 @@ pub struct Preset {
     pub embience_ids: Vec<u32>,
 }
 
+/// Satu pesan Live Chat. `url`, `avatar_url`, dan `attachment_url` (kalau ada)
+/// selalu `http(s)://` (avatar dan lampiran `https://`); klien tetap memeriksanya.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChatMessage {
+    pub id: u32,
+    pub username: String,
+    pub url: Option<String>,
+    pub avatar_url: Option<String>,
+    pub message: String,
+    pub attachment_url: Option<String>,
+    /// UTC, `YYYY-MM-DDTHH:MM:SSZ`.
+    pub created_at: String,
+}
+
+/// Body `POST /api/v1/messages`. Server merapikan dan memvalidasi ulang semuanya
+/// (lihat [`chat`]); field yang tidak dikenal diabaikan.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NewMessage {
+    pub username: String,
+    #[serde(default)]
+    pub url: Option<String>,
+    pub message: String,
+}
+
+/// Perapian dan pemeriksaan teks Live Chat. Dipakai server (yang berwenang) dan
+/// klien (hanya untuk pratinjau/tombol kirim), supaya aturannya tidak berbeda.
+pub mod chat {
+    use super::{limits, validate};
+
+    /// Alasan sebuah input ditolak. `message()` aman dikirim ke klien.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Reject {
+        UsernameLength,
+        UsernameChars,
+        MessageLength,
+        MessageChars,
+        Link,
+        /// Dipakai server untuk daftar kata terlarang; pesannya sengaja umum.
+        Blocked,
+    }
+
+    impl Reject {
+        pub fn message(self) -> &'static str {
+            match self {
+                Reject::UsernameLength => "Username must be 1 to 32 characters.",
+                Reject::UsernameChars => "Username has characters that are not allowed.",
+                Reject::MessageLength => {
+                    "Message must be 1 to 1000 characters and at most 20 lines."
+                }
+                Reject::MessageChars => "Message has characters that are not allowed.",
+                Reject::Link => "The link must be a valid web address.",
+                Reject::Blocked => "This message was rejected.",
+            }
+        }
+    }
+
+    /// Karakter kontrol dan karakter tak terlihat/pembalik arah teks
+    /// (zero-width, U+202E, dst.) yang dipakai untuk menyamar.
+    fn hidden(c: char) -> bool {
+        c.is_control()
+            || matches!(
+                c,
+                '\u{00AD}'
+                    | '\u{200B}'..='\u{200F}'
+                    | '\u{202A}'..='\u{202E}'
+                    | '\u{2060}'..='\u{2064}'
+                    | '\u{2066}'..='\u{2069}'
+                    | '\u{FEFF}'
+            )
+    }
+
+    /// Spasi berurutan (juga tab/baris baru) menjadi satu spasi; 1..=32 karakter.
+    pub fn clean_username(raw: &str) -> Result<String, Reject> {
+        let s = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+        if s.chars().any(hidden) {
+            return Err(Reject::UsernameChars);
+        }
+        let n = s.chars().count();
+        if n == 0 || n > limits::MAX_USERNAME_CHARS {
+            return Err(Reject::UsernameLength);
+        }
+        Ok(s)
+    }
+
+    /// `\r\n` menjadi `\n`, tab menjadi spasi, lebih dari satu baris kosong
+    /// berturut-turut diringkas; 1..=1000 karakter dan paling banyak 20 baris.
+    pub fn clean_message(raw: &str) -> Result<String, Reject> {
+        let unified = raw.replace("\r\n", "\n").replace('\r', "\n");
+        let mut out = String::with_capacity(unified.len());
+        for c in unified.chars() {
+            match c {
+                '\n' => out.push('\n'),
+                '\t' => out.push(' '),
+                c if hidden(c) => return Err(Reject::MessageChars),
+                c => out.push(c),
+            }
+        }
+        let mut lines: Vec<&str> = Vec::new();
+        for line in out.trim().split('\n') {
+            let line = line.trim_end();
+            // Paling banyak satu baris kosong berturut-turut.
+            if line.is_empty() && lines.last().is_some_and(|l| l.is_empty()) {
+                continue;
+            }
+            lines.push(line);
+        }
+        let s = lines.join("\n");
+        let n = s.chars().count();
+        if n == 0 || n > limits::MAX_MESSAGE_CHARS || lines.len() > limits::MAX_MESSAGE_LINES {
+            return Err(Reject::MessageLength);
+        }
+        Ok(s)
+    }
+
+    /// Tautan opsional: kosong -> `None`; selain itu harus jadi URL `http(s)`
+    /// (lihat [`validate::normalize_url`]) dan paling panjang 300 karakter.
+    pub fn clean_link(raw: &str) -> Result<Option<String>, Reject> {
+        if raw.trim().is_empty() {
+            return Ok(None);
+        }
+        match validate::normalize_url(raw) {
+            Some(url) if url.chars().count() <= limits::MAX_LINK_CHARS => Ok(Some(url)),
+            _ => Err(Reject::Link),
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn usernames_are_collapsed_and_bounded() {
+            assert_eq!(clean_username("  Moch   T \n").as_deref(), Ok("Moch T"));
+            assert_eq!(clean_username("名前").as_deref(), Ok("名前"));
+            assert_eq!(clean_username("   "), Err(Reject::UsernameLength));
+            assert_eq!(clean_username(&"a".repeat(33)), Err(Reject::UsernameLength));
+            assert!(clean_username(&"a".repeat(32)).is_ok());
+            for bad in ["a\u{0}b", "adm\u{202E}in", "a\u{200B}b", "a\u{FEFF}"] {
+                assert_eq!(clean_username(bad), Err(Reject::UsernameChars), "{bad:?}");
+            }
+        }
+
+        #[test]
+        fn messages_are_normalised_and_bounded() {
+            assert_eq!(clean_message("  hi  ").as_deref(), Ok("hi"));
+            assert_eq!(clean_message("a\r\nb\rc").as_deref(), Ok("a\nb\nc"));
+            assert_eq!(clean_message("a\tb").as_deref(), Ok("a b"));
+            assert_eq!(clean_message("a\n\n\n\n\nb").as_deref(), Ok("a\n\nb"));
+            assert_eq!(clean_message(" \n "), Err(Reject::MessageLength));
+            assert_eq!(clean_message(&"a".repeat(1001)), Err(Reject::MessageLength));
+            assert!(clean_message(&"a".repeat(1000)).is_ok());
+            assert!(
+                clean_message(&"é".repeat(1000)).is_ok(),
+                "counted in chars, not bytes"
+            );
+            let many = (0..21).map(|_| "x").collect::<Vec<_>>().join("\n");
+            assert_eq!(clean_message(&many), Err(Reject::MessageLength));
+            let twenty = (0..20).map(|_| "x").collect::<Vec<_>>().join("\n");
+            assert!(clean_message(&twenty).is_ok());
+            for bad in ["a\u{0}b", "a\u{1b}[31m", "x\u{202E}y"] {
+                assert_eq!(clean_message(bad), Err(Reject::MessageChars), "{bad:?}");
+            }
+        }
+
+        #[test]
+        fn links_are_optional_and_always_http() {
+            assert_eq!(clean_link(""), Ok(None));
+            assert_eq!(clean_link("  "), Ok(None));
+            assert_eq!(clean_link("a.dev"), Ok(Some("https://a.dev".to_owned())));
+            assert_eq!(clean_link("javascript:alert(1)"), Err(Reject::Link));
+            assert_eq!(clean_link("a b"), Err(Reject::Link));
+            assert_eq!(
+                clean_link(&format!("a.dev/{}", "x".repeat(300))),
+                Err(Reject::Link)
+            );
+        }
+    }
+}
+
 /// Kode error yang stabil dan aman ditampilkan; pesan detail internal tidak
 /// pernah dikirim ke klien.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -194,6 +462,8 @@ pub enum ErrorCode {
     BadRequest,
     NotFound,
     MethodNotAllowed,
+    /// Request ditolak karena asalnya (mis. `Origin` yang tidak diizinkan).
+    Forbidden,
     PayloadTooLarge,
     RateLimited,
     Unavailable,

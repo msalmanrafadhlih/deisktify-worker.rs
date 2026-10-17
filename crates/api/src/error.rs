@@ -26,6 +26,21 @@ impl AppError {
         code: ErrorCode::MethodNotAllowed,
         message: "Method not allowed.",
     };
+    pub const FORBIDDEN: Self = Self {
+        status: StatusCode::FORBIDDEN,
+        code: ErrorCode::Forbidden,
+        message: "Request not allowed from this origin.",
+    };
+    pub const PAYLOAD_TOO_LARGE: Self = Self {
+        status: StatusCode::PAYLOAD_TOO_LARGE,
+        code: ErrorCode::PayloadTooLarge,
+        message: "Request body is too large.",
+    };
+    pub const RATE_LIMITED: Self = Self {
+        status: StatusCode::TOO_MANY_REQUESTS,
+        code: ErrorCode::RateLimited,
+        message: "Too many messages, try again in a moment.",
+    };
     pub const UNAVAILABLE: Self = Self {
         status: StatusCode::SERVICE_UNAVAILABLE,
         code: ErrorCode::Unavailable,
@@ -36,6 +51,17 @@ impl AppError {
         code: ErrorCode::Internal,
         message: "Something went wrong.",
     };
+}
+
+impl AppError {
+    /// 400 dengan pesan tetap (tidak pernah memuat input pengguna).
+    pub const fn bad_request(message: &'static str) -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            code: ErrorCode::BadRequest,
+            message,
+        }
+    }
 }
 
 impl IntoResponse for AppError {

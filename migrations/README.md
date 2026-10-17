@@ -11,6 +11,7 @@ pemisah), mis. `0001_generations.sql`. Tabel pertama datang di tahap D2.
 | `embiences`, `embience_presets`, `embience_preset_items` | `0004_embiences.sql` |
 | `chat_messages` | `0005_chat_messages.sql` |
 | `journal_snapshots` | `0006_journal_snapshots.sql` |
+| `chat_rate_limits` (pembatas kecepatan chat) | `0007_chat_rate_limits.sql` |
 
 ## Aturan
 

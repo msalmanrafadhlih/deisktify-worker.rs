@@ -2,7 +2,7 @@
 
 API untuk situs [tquilla.is-a.dev](https://tquilla.is-a.dev): **Axum (Rust) di Cloudflare Workers** (`workers-rs`) dengan database **Turso (libSQL)**. Frontend-nya ada di repo terpisah (Dioxus, GitHub Pages) dan hanya memakai REST + JSON.
 
-Rencana dan keputusan lengkap (D0–D8) ada di README repo frontend, bagian "Fullstack dan database". Repo ini sampai **D3 (endpoint baca)**: `GET /api/v1/health` dan lima endpoint konten read-only, skema database, seed, dan runner migrasi. Belum ada endpoint tulis (D4).
+Rencana dan keputusan lengkap (D0–D8) ada di README repo frontend, bagian "Fullstack dan database". Repo ini sampai **D4a (Live Chat teks)**: `GET /api/v1/health`, lima endpoint konten read-only, serta `GET/POST /api/v1/messages` dengan validasi, pembatas kecepatan, dan filter kata terlarang; ditambah skema database, seed, dan runner migrasi. Gambar (R2) dan moderasi menyusul di D4b.
 
 ## Isi repo
 
@@ -10,7 +10,7 @@ Rencana dan keputusan lengkap (D0–D8) ada di README repo frontend, bagian "Ful
 | --- | --- |
 | `crates/api-types` | Kontrak API: struct serde, path, konstanta batas. **Dipakai bersama frontend** (hanya `serde`, ikut dikompilasi ke wasm32) |
 | `crates/turso-http` | Klien API HTTP Turso (`/v2/pipeline`): `execute` dan `transaction`, plus runner migrasi (`migrate`). Tanpa runtime tertentu; transport bisa diganti |
-| `crates/api` | Worker: router Axum, CORS, error JSON, `health`, endpoint konten (`content.rs`, `routes.rs`, `queries/*.sql`). Berisi `wrangler.toml` |
+| `crates/api` | Worker: router Axum, CORS, error JSON, `health`, endpoint konten (`content.rs`), Live Chat (`chat.rs`), `routes.rs`, `queries/*.sql`. Berisi `wrangler.toml` |
 | `crates/migrate` | CLI native `migrate status/up/seed` di atas `turso-http` (bukan bagian dari Worker) |
 | `migrations/` | Migrasi `.sql` berurutan (skema); lihat `migrations/README.md` |
 | `seeds/` | SQL seed hasil `scripts/gen_seed.mjs` (konten situs, dan contoh untuk dev) |
@@ -29,8 +29,23 @@ Rencana dan keputusan lengkap (D0–D8) ada di README repo frontend, bagian "Ful
 | GET | `/api/v1/radio` | `{"items":[{id,label,slogan,stream_url,official_link?,image_url?}]}`, hanya stasiun aktif |
 | GET | `/api/v1/embiences` | `{"items":[{id,name,icon_url,stream_url}]}` |
 | GET | `/api/v1/presets` | `{"items":[{id,label,embience_ids:[...]}]}`; id yang tidak ada dibuang, duplikat dihapus |
+| GET | `/api/v1/messages?after=<id>&limit=<n>` | `{"items":[{id,username,url?,avatar_url?,message,attachment_url?,created_at}]}`, **terlama dulu**. Tanpa `after`: `limit` pesan terbaru (default 50, maks 100). Dengan `after`: hanya yang lebih baru dari id itu (untuk polling). Parameter lain atau bukan angka → `400`. `no-store` |
+| POST | `/api/v1/messages` | Body `{"username","url"?,"message"}` (JSON, maks 16 KiB) → `201` dengan pesan yang tersimpan. `400` input ditolak atau bukan `application/json`, `403` Origin tidak diizinkan, `413` body terlalu besar, `429` terlalu sering (+ `Retry-After`) |
 
 Endpoint konten: baris dengan URL tidak aman dibuang di server (URL opsional radio yang buruk dikosongkan), klien memeriksa ulang dengan `api_types::validate`. Respons sukses memakai `Cache-Control: public, max-age=60, stale-while-revalidate=300`; error tetap `no-store`. Database tidak terjangkau → `503` kode `unavailable`; data yang bentuknya salah → `500`. Method selain `GET` → `405`.
+
+**Live Chat (D4a).** Server tidak percaya klien: username (1–32 karakter, spasi dirapikan), pesan (1–1000 karakter, maks 20 baris), dan tautan (`http(s)`, maks 300 karakter, skema selalu dinormalisasi ulang) dirapikan dan divalidasi lagi di `api_types::chat`; karakter kontrol dan karakter tak terlihat/pembalik arah (zero-width, U+202E) ditolak. Kata terlarang dicocokkan tanpa peduli huruf besar/kecil dan tanda pemisah (`b.a-d` cocok dengan `bad`). Pesan error umum dan **tidak pernah memantulkan input**. POST wajib `Content-Type: application/json` (memaksa preflight CORS) dan, bila ada header `Origin`, harus ada di `ALLOWED_ORIGINS`.
+
+Pembatas kecepatan: **5 pesan per menit dan 40 per jam per pengirim**, disimpan di tabel `chat_rate_limits` (migrasi `0007`). Kunci pengirim = SHA-256(`RATE_LIMIT_SALT` + IP dari `CF-Connecting-IP`), jadi alamat IP asli tidak pernah ditulis ke database. Batas menit diperiksa dulu; kalau penuh, hitungan jam tidak ikut naik. Baris lama dibersihkan di transaksi yang sama. Dipilih tabel di database (bukan binding Rate Limiting Cloudflare) karena binding itu hanya konsisten per lokasi dan tidak dirancang untuk kunci berupa IP. **Tidak ada batas global**: banyak IP berbeda tetap bisa memenuhi chat; moderasi menyusul di D4b.
+
+Konfigurasi baru (tidak ada di repo):
+
+| Nama | Jenis | Isi |
+| --- | --- | --- |
+| `RATE_LIMIT_SALT` | secret | string acak panjang: `openssl rand -hex 32`, lalu `npx wrangler secret put RATE_LIMIT_SALT`. Kosong tetap jalan, tetapi hash IP lebih mudah ditebak. Mengganti nilainya mereset hitungan semua orang |
+| `BANNED_WORDS` | secret atau var | kata dipisah koma atau baris baru (maks 500 kata). Sengaja tidak di repo publik. Kosong = tidak ada filter |
+
+Respons `GET /messages` tidak boleh di-cache (`no-store`), supaya polling selalu mendapat data baru.
 
 Semua error berbentuk `{"error":{"code":"not_found","message":"Not found."}}`. Semua respons membawa `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `Cache-Control: no-store`.
 
@@ -98,6 +113,7 @@ Sejak D3, migrasi dan seed konten ke Turso production dijalankan otomatis oleh j
 - Job memakai `environment: production`; di Settings > Environments kamu bisa menambah "Required reviewers" untuk persetujuan manual. Log Actions repo publik itu publik, jadi nama host Turso disamarkan dengan `::add-mask::`.
 - **Aturan migrasi:** job ini jalan *sebelum* Worker baru di-deploy, jadi Worker lama masih berjalan di skema baru. Migrasi harus kompatibel mundur (tambah tabel/kolom, jangan hapus atau ganti nama dulu; hapus di rilis berikutnya).
 - Seed memakai `INSERT OR IGNORE`: mengubah isi `seeds/source/*.json` **tidak** memperbarui baris yang sudah ada. Mengubah konten yang sudah tayang butuh migrasi baru atau (D6) endpoint admin.
+- Migrasi `0007_chat_rate_limits` ikut diterapkan job ini; log akhir harus "up to date (7 applied)".
 - Deploy Worker tetap terpisah (`npx wrangler deploy` dari `crates/api`, atau D8).
 
 ### Migrasi manual (debug, atau database lokal)
@@ -116,24 +132,25 @@ Jangan commit token. `.dev.vars` dan `.env` sudah di-`.gitignore`.
 
 ## Dipakai oleh frontend
 
-Setelah repo ini dipush dan diberi tag (kini `v0.2.0`, yang membawa endpoint D3), repo frontend memakai tipenya lewat git dependency:
+Setelah repo ini dipush dan diberi tag (kini `v0.3.0`, yang membawa endpoint chat D4a), repo frontend memakai tipenya lewat git dependency:
 
 ```toml
 # packages/components/Cargo.toml (repo frontend)
-api-types = { git = "https://github.com/msalmanrafadhlih/deisktify-worker.rs", tag = "v0.2.0" }
+api-types = { git = "https://github.com/msalmanrafadhlih/deisktify-worker.rs", tag = "v0.3.0" }
 ```
 
 Perubahan yang tidak kompatibel di `api-types` = tag baru; frontend memilih kapan ikut naik.
 
 ## Yang sudah dan belum terverifikasi
 
-Sudah (dijalankan di sandbox dengan rustc 1.97.0): `cargo fmt`, `cargo clippy --workspace --all-targets --locked -D warnings` di target host, 86 test Rust (kontrak dan validator `api-types`, klien dan runner migrasi `turso-http`, CLI `migrate`, serta router/CORS/health/konten `api` lewat `tower::oneshot` dan transport palsu) dan 23 test node (termasuk kelima query `.sql` terhadap SQLite sungguhan). Migrasi dan seed diterapkan di SQLite 3.45 sungguhan (Python `sqlite3` dan `node:sqlite`): skema valid, seed idempotent, CHECK menolak URL `javascript:`, avatar base64, JSON rusak, dsb. CLI `migrate` dijalankan end-to-end lewat server Hrana tiruan (skrip sementara di atas SQLite, bukan `sqld`): `up`, `seed`, jalan ulang, checksum berubah ditolak, migrasi gagal ter-rollback. Request klien Turso dicocokkan dengan keluaran encoder referensi resmi `@libsql/hrana-client` 0.10.0, dan fixture respons diterima decoder referensinya.
+Sudah (dijalankan di sandbox dengan rustc 1.97.0): `cargo fmt`, `cargo clippy --workspace --all-targets --locked -D warnings` di target host, 114 test Rust (kontrak dan validator `api-types`, klien dan runner migrasi `turso-http`, CLI `migrate`, serta router/CORS/health/konten/chat `api` lewat `tower::oneshot` dan transport palsu) dan 26 test node (termasuk kelima query `.sql` terhadap SQLite sungguhan). Migrasi dan seed diterapkan di SQLite 3.45 sungguhan (Python `sqlite3` dan `node:sqlite`): skema valid, seed idempotent, CHECK menolak URL `javascript:`, avatar base64, JSON rusak, dsb. CLI `migrate` dijalankan end-to-end lewat server Hrana tiruan (skrip sementara di atas SQLite, bukan `sqld`): `up`, `seed`, jalan ulang, checksum berubah ditolak, migrasi gagal ter-rollback. Request klien Turso dicocokkan dengan keluaran encoder referensi resmi `@libsql/hrana-client` 0.10.0, dan fixture respons diterima decoder referensinya.
 
 **Belum:**
 - Kompilasi ke `wasm32-unknown-unknown` dan `worker-build` (sandbox tidak punya target itu; job `wasm` di CI yang pertama kali membuktikannya).
 - `wrangler dev` / `wrangler deploy`, serta tempat `worker-build` mencari crate di dalam workspace (jika gagal, pindahkan `wrangler.toml` ke root dan sesuaikan).
 - Migrasi dan seed sudah dicoba Moch di `turso dev` sungguhan (2026-10-16: `up`, ulangan, seed idempotent). **Belum** dicoba terhadap Turso cloud, dan kelima endpoint konten (D3) belum dijalankan terhadap `sqld`/Turso: querynya baru diuji di SQLite biasa. Server tiruan di sandbox hanya menafsirkan protokol seperti klien referensi.
 - Batas plan gratis Cloudflare (ukuran wasm, waktu CPU per request): cek angkanya di dokumentasi Cloudflare terhadap ukuran hasil build.
+- Live Chat (D4a) belum dijalankan terhadap `sqld`/Turso cloud dan Worker sungguhan: logikanya diuji dengan transport palsu dan, end-to-end, lewat server Hrana tiruan di atas SQLite (5 pesan diterima, ke-6 ditolak `429`, pengirim lain tidak terkena, menit berikutnya longgar lagi). Header `CF-Connecting-IP` hanya ada di Cloudflare; lokal semua pengirim dihitung satu (`local`).
 - Dev shell Nix (`flake.nix`, `devenv.nix`): hanya sintaksnya yang diperiksa.
 
 ## Lisensi

@@ -51,7 +51,7 @@ test("all migrations apply to an empty database", () => {
     .all()
     .map((r) => r.name);
   assert.deepEqual(tables, [
-    "bookmarks", "chat_messages", "embience_preset_items", "embience_presets",
+    "bookmarks", "chat_messages", "chat_rate_limits", "embience_preset_items", "embience_presets",
     "embiences", "generations", "journal_snapshots", "radio_stations",
   ]);
 });
@@ -188,10 +188,59 @@ test("API queries: presets keep item order, empty presets, and drop dangling ite
   assert.equal(presets[2].ids.length, 2);
 });
 
+const sqlOf = (name) => readFileSync(join(root, "crates/api/src/queries", `${name}.sql`), "utf8");
+const insertMsg = (db, username, message, at = "2026-10-17T00:00:00Z", url = null) =>
+  db.prepare(sqlOf("messages_insert")).get(username, url, message, at);
+
+test("chat queries: insert returns the stored row; created_at must be a UTC timestamp", () => {
+  const db = freshDb();
+  const row = insertMsg(db, "moch", "hello", "2026-10-17T05:30:00Z", "https://a.dev");
+  assert.deepEqual({ ...row }, {
+    id: 1, username: "moch", url: "https://a.dev", avatar_url: null,
+    message: "hello", attachment_url: null, created_at: "2026-10-17T05:30:00Z",
+  });
+  assert.equal(insertMsg(db, "x", "y").id, 2);
+  assert.throws(() => insertMsg(db, "x", "y", "17-10-2026"), /CHECK/);
+  assert.throws(() => insertMsg(db, "x", "y", "2026-10-17T00:00:00Z", "javascript:alert(1)"), /CHECK/);
+});
+
+test("chat queries: recent returns the last N oldest-first; after returns only newer", () => {
+  const db = freshDb();
+  for (let i = 1; i <= 7; i++) insertMsg(db, "u", `m${i}`);
+  const recent = db.prepare(sqlOf("messages_recent")).all(3);
+  assert.deepEqual(recent.map((r) => r.message), ["m5", "m6", "m7"]);
+  const after = db.prepare(sqlOf("messages_after")).all(4, 100);
+  assert.deepEqual(after.map((r) => r.id), [5, 6, 7]);
+  assert.deepEqual(db.prepare(sqlOf("messages_after")).all(4, 2).map((r) => r.id), [5, 6]);
+  assert.deepEqual(db.prepare(sqlOf("messages_after")).all(7, 100), []);
+  assert.deepEqual(db.prepare(sqlOf("messages_recent")).all(100).length, 7);
+});
+
+test("rate limit queries: hits count up per key and window; cleanup only removes old windows", () => {
+  const db = freshDb();
+  const hit = (scope, key, window) => db.prepare(sqlOf("rate_hit")).get(scope, key, window).hits;
+  assert.equal(hit("m", "ip1", 100), 1);
+  assert.equal(hit("m", "ip1", 100), 2);
+  assert.equal(hit("m", "ip1", 100), 3);
+  assert.equal(hit("m", "ip2", 100), 1, "other key");
+  assert.equal(hit("m", "ip1", 101), 1, "next window");
+  assert.equal(hit("h", "ip1", 100), 1, "other scope");
+  assert.throws(() => hit("x", "ip1", 1), /CHECK/);
+  db.prepare(sqlOf("rate_cleanup")).run(101, 100);
+  const left = db
+    .prepare("SELECT scope, key, window FROM chat_rate_limits ORDER BY scope, key, window")
+    .all()
+    .map((r) => ({ ...r }));
+  assert.deepEqual(left, [
+    { scope: "h", key: "ip1", window: 100 },
+    { scope: "m", key: "ip1", window: 101 },
+  ]);
+});
+
 test("API queries are bounded", () => {
-  for (const name of ["generations", "bookmarks", "radio", "embiences", "presets"]) {
+  for (const name of ["generations", "bookmarks", "radio", "embiences", "presets", "messages_after"]) {
     const sql = readFileSync(join(root, "crates/api/src/queries", `${name}.sql`), "utf8");
-    assert.match(sql, /\bLIMIT\s+\d+\s*$/im, name);
+    assert.match(sql, /\bLIMIT\s+(\d+|\?\d+)\s*$/im, name);
     assert.match(sql, /\bORDER BY\b/i, name);
   }
 });
