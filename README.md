@@ -34,6 +34,8 @@ Rencana dan keputusan lengkap (D0–D8) ada di README repo frontend, bagian "Ful
 | POST | `/api/v1/messages/{id}/report` | Body diabaikan → `204` baik entri ada maupun tidak (tidak membocorkan id). Satu laporan per pengirim (hash IP) per entri; maks 20 laporan per jam per pengirim → `429`. Tidak ada auto-hide |
 | GET | `/api/v1/admin/reports` | Admin saja (`Authorization: Bearer <ADMIN_TOKEN>`): `{"items":[{id,username,url?,message,created_at,reports,last_reported_at}]}`, paling banyak dilaporkan dulu (maks 50). `401` tanpa/salah token |
 | DELETE | `/api/v1/admin/messages/{id}` | Admin saja: menyembunyikan entri (soft delete, kolom `deleted_at`) → `204`; `404` bila tidak ada atau sudah tersembunyi; `401` tanpa/salah token |
+| GET | `/api/v1/journal` | Snapshot terbaru jurnal GitHub (halaman `/profile`): `{"fetched_at":"…Z","source":"github"\|"seed","data":{hero,pinned,chronicle}}`. **Data, bukan tampilan**: tidak ada HTML dan tidak ada kalimat (lihat `api_types::journal`). Payload diperiksa lagi sebelum dikirim. `503` bila belum pernah ada snapshot. `Cache-Control: public, max-age=300, stale-while-revalidate=600` |
+| POST | `/api/v1/admin/journal/refresh` | Admin saja: ambil dari GitHub sekarang tanpa menunggu cron → `200 {"fetched_at":"…Z"}`. Paling cepat sekali per menit (`429` + `Retry-After`); `503` bila `GITHUB_TOKEN` belum diisi; `502` bila GitHub gagal; `401` tanpa/salah token |
 
 Endpoint konten: baris dengan URL tidak aman dibuang di server (URL opsional radio yang buruk dikosongkan), klien memeriksa ulang dengan `api_types::validate`. Respons sukses memakai `Cache-Control: public, max-age=60, stale-while-revalidate=300`; error tetap `no-store`. Database tidak terjangkau → `503` kode `unavailable`; data yang bentuknya salah → `500`. Method selain `GET` → `405`.
 
@@ -51,6 +53,7 @@ export ADMIN_TOKEN=...                                  # sama dengan secret Wor
 
 curl -s -H "Authorization: Bearer $ADMIN_TOKEN" "$API/api/v1/admin/reports"
 curl -s -X DELETE -H "Authorization: Bearer $ADMIN_TOKEN" "$API/api/v1/admin/messages/42" -w '%{http_code}\n'   # 204
+curl -s -X POST -H "Authorization: Bearer $ADMIN_TOKEN" "$API/api/v1/admin/journal/refresh"                     # {"fetched_at":"…"}
 ```
 
 Konfigurasi baru (tidak ada di repo):
@@ -59,7 +62,17 @@ Konfigurasi baru (tidak ada di repo):
 | --- | --- | --- |
 | `RATE_LIMIT_SALT` | secret | string acak panjang: `openssl rand -hex 32`, lalu `npx wrangler secret put RATE_LIMIT_SALT`. Kosong tetap jalan, tetapi hash IP lebih mudah ditebak. Mengganti nilainya mereset hitungan semua orang |
 | `ADMIN_TOKEN` | secret | token admin, minimal 32 karakter: `openssl rand -hex 32`, lalu `npx wrangler secret put ADMIN_TOKEN`. Tidak diset = endpoint admin mati (`401`). Mengganti nilainya langsung mencabut token lama |
+| `GITHUB_TOKEN` | secret | token GitHub untuk cron jurnal. Cukup scope `read:user` (data publik); tambahkan `repo` hanya bila kontribusi privat mau ikut dihitung. Buat token baru (fine-grained atau classic), `npx wrangler secret put GITHUB_TOKEN`, lalu cabut token Worker lama. Tidak diset = cron dan refresh manual gagal (tercatat di log), halaman tetap menampilkan snapshot terakhir |
 | `BANNED_WORDS` | secret atau var | kata dipisah koma atau baris baru (maks 500 kata). Sengaja tidak di repo publik. Kosong = tidak ada filter |
+
+**GitHub Journal (D5, migrasi `0009`).** Pengganti Worker JavaScript lama (`github-journal-stats`). Cron Trigger `0 */6 * * *` (`[triggers]` di `crates/api/wrangler.toml`) menjalankan query GraphQL yang sama dengan Worker lama, menyimpan hasilnya ke `journal_snapshots` (`source = 'github'`, 28 terbaru dipertahankan, seed tidak pernah dipangkas), dan `GET /journal` hanya membaca snapshot terakhir. Kalau GitHub gagal, snapshot lama tetap dipakai dan galatnya masuk log Worker.
+
+- **Pengaturan ada di tabel, bukan kode**, supaya D6 (dashboard) bisa mengubahnya: `journal_profile` (satu baris: akun GitHub), `journal_pinned_repos` (`position`, `repo_name`, `topic`) dan `journal_stack` (`position`, `name`). Nilai awalnya (isi `CONFIG` Worker lama) ditulis di migrasi `0009`, **bukan** di `seeds/`: seed berjalan ulang tiap rilis dan akan menghidupkan lagi baris yang sudah kamu hapus.
+- **Nilai dari database tidak dipercaya.** Nama repo dikirim ke GitHub sebagai *variabel* GraphQL (`$repo0`, `$repo1`, ...), tidak pernah disisipkan ke teks query; akun dan nama repo diperiksa ulang saat dibaca (huruf, angka, `-`, `.`, `_`) dan baris yang buruk dibuang. `CHECK` di tabel adalah pagar terakhir.
+- **Tanpa HTML.** Worker lama membuat `monthly_focus_html` dengan menempelkan nama repo mentah ke string HTML yang lalu ditampilkan klien lewat `dangerous_inner_html`. Sekarang payload hanya berisi data (`monthly_focus: {repo, language}`); klien menyusun kalimatnya. `Data::validate` dijalankan sebelum menyimpan **dan** sebelum mengirim.
+- **Perbedaan kecil dari Worker lama** (disengaja): commit per repositori hanya diminta untuk bulan ini (dulu 12 bulan lalu disaring; lebih ringan untuk batas CPU 10 ms), periode "tahun lalu" berakhir sedetik sebelum periode sekarang (dulu kehilangan hari terakhirnya), hari tersibuk tidak menyertakan hari tanpa kontribusi, dan hari produktif tanpa aktivitas jatuh ke hari ini (dulu selalu Minggu).
+- **Refresh manual** lewat `POST /admin/journal/refresh` (curl saja; CORS tetap tidak mengizinkan `Authorization`). Berguna tepat setelah deploy pertama, supaya halaman tidak kosong sampai cron pertama berjalan.
+- Batas plan gratis (lihat [dokumentasi Cloudflare](https://developers.cloudflare.com/workers/platform/limits)): **CPU 10 ms per eksekusi, termasuk cron**, dan 5 cron per akun. Menunggu jaringan tidak dihitung; parse JSON dan transformasi dihitung. Parse memakai struct yang hanya memuat kolom yang dipakai. Angka sebenarnya belum terukur (lihat bawah).
 
 Respons `GET /messages` tidak boleh di-cache (`no-store`): entri baru dan entri yang baru disembunyikan harus langsung terlihat saat Refresh.
 
@@ -167,6 +180,7 @@ Sudah (dijalankan di sandbox dengan rustc 1.97.0): `cargo fmt`, `cargo clippy --
 - Migrasi dan seed sudah dicoba Moch di `turso dev` sungguhan (2026-10-16: `up`, ulangan, seed idempotent). **Belum** dicoba terhadap Turso cloud, dan kelima endpoint konten (D3) belum dijalankan terhadap `sqld`/Turso: querynya baru diuji di SQLite biasa. Server tiruan di sandbox hanya menafsirkan protokol seperti klien referensi.
 - Batas plan gratis Cloudflare (ukuran wasm, waktu CPU per request): cek angkanya di dokumentasi Cloudflare terhadap ukuran hasil build.
 - Guestbook dan moderasi (D4) belum dijalankan terhadap `sqld`/Turso cloud dan Worker sungguhan: logikanya diuji dengan transport palsu dan, end-to-end, lewat server Hrana tiruan di atas SQLite (5 pesan diterima, ke-6 ditolak `429`, pengirim lain tidak terkena, menit berikutnya longgar lagi; ini hasil D4a, belum diulang untuk laporan/admin). Endpoint laporan dan admin baru diuji lewat `tower::oneshot` dan SQLite, belum dengan `ADMIN_TOKEN` sungguhan di Worker. Header `CF-Connecting-IP` hanya ada di Cloudflare; lokal semua pengirim dihitung satu (`local`).
+- Jurnal (D5): logika (query, transformasi, simpan, baca, refresh, batas refresh manual) diuji dengan fixture GraphQL buatan sendiri dan transport palsu, dan SQL-nya di SQLite sungguhan (`scripts/migrations.test.mjs`). **Belum**: panggilan nyata ke `api.github.com` (tidak ada token di sandbox, jadi bentuk respons GitHub yang sebenarnya belum dicocokkan), cron yang berjalan di Cloudflare, dan waktu CPU per eksekusi (cek di dashboard Cloudflare setelah cron pertama; kalau melewati 10 ms, eksekusi gagal dan snapshot lama dipakai terus).
 - Dev shell Nix (`flake.nix`, `devenv.nix`): hanya sintaksnya yang diperiksa.
 
 ## Lisensi

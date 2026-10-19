@@ -51,6 +51,24 @@ impl AppError {
         code: ErrorCode::Unavailable,
         message: "Service temporarily unavailable.",
     };
+    /// Data jurnal belum pernah dibuat (cron belum jalan sekali pun).
+    pub const NOT_READY: Self = Self {
+        status: StatusCode::SERVICE_UNAVAILABLE,
+        code: ErrorCode::Unavailable,
+        message: "The journal has not been generated yet.",
+    };
+    /// Endpoint admin yang butuh pengaturan Worker yang belum diisi.
+    pub const NOT_CONFIGURED: Self = Self {
+        status: StatusCode::SERVICE_UNAVAILABLE,
+        code: ErrorCode::Unavailable,
+        message: "This feature is not configured.",
+    };
+    /// Layanan luar (GitHub) gagal.
+    pub const UPSTREAM: Self = Self {
+        status: StatusCode::BAD_GATEWAY,
+        code: ErrorCode::Unavailable,
+        message: "Could not reach GitHub.",
+    };
     pub const INTERNAL: Self = Self {
         status: StatusCode::INTERNAL_SERVER_ERROR,
         code: ErrorCode::Internal,

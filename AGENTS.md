@@ -20,5 +20,6 @@
   cargo clippy -p api --target wasm32-unknown-unknown --locked -- -D warnings
   node --test scripts/migrations.test.mjs
   ```
+- **Jurnal (D5)**: `crates/api/src/journal.rs` (logika murni, dites native), `github.rs` (hanya `fetch`), kontrak di `api_types::journal`. Payload adalah **data, bukan tampilan**: jangan menambah field HTML/markup atau kalimat berbahasa tertentu. Nama repo/akun dari tabel `journal_*` masuk ke GraphQL **hanya sebagai variabel**, jangan pernah disisipkan ke teks query. Pengaturan jurnal yang bisa diedit admin ada di migrasi, bukan seed. Token GitHub hanya di header `Authorization` (tidak di body, log, atau `Debug`). Waktu: `time.rs`, bukan crate tanggal (wasm kecil).
 - Kerjakan tahap demi tahap sesuai README repo frontend (D1 → D8) dan centang di sana.
 - **Migrasi production lewat CI**: job `migrate` di `ci.yml` (tag `v*`, `environment: production`) menjalankan `migrate up --yes` lalu `seed --yes`. Jangan menambah `--samples` di sana. Migrasi harus kompatibel mundur dengan Worker yang sedang berjalan (job ini jalan sebelum deploy Worker).

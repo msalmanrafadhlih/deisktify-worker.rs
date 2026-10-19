@@ -22,6 +22,8 @@ use crate::{
     content::{self, ContentError, Loaded},
     db::{self, WorkerTransport},
     error::AppError,
+    github::GithubClient,
+    journal::{self, JournalError},
 };
 
 /// Konten jarang berubah: browser boleh memakai salinan 1 menit dan menyajikan
@@ -374,6 +376,79 @@ pub async fn admin_delete(
     }
 }
 
+// ------------------------------------------------------------ Journal (D5)
+
+/// Respons jurnal berubah paling cepat tiap refresh (cron 6 jam): browser
+/// boleh memakai salinan 5 menit.
+const JOURNAL_CACHE: &str = "public, max-age=300, stale-while-revalidate=600";
+
+/// Pesan error umum; detail hanya ke log Worker.
+pub fn journal_error(e: &JournalError) -> Response {
+    use turso_http::Error;
+    match e {
+        JournalError::TooSoon { retry_after_secs } => {
+            let mut res = AppError::RATE_LIMITED.into_response();
+            if let Ok(v) = HeaderValue::from_str(&retry_after_secs.to_string()) {
+                res.headers_mut().insert(header::RETRY_AFTER, v);
+            }
+            res
+        }
+        JournalError::NotConfigured(_) => AppError::NOT_CONFIGURED.into_response(),
+        JournalError::Upstream(_) => AppError::UPSTREAM.into_response(),
+        JournalError::Db(Error::Config(_) | Error::Transport(_) | Error::Http { .. }) => {
+            AppError::UNAVAILABLE.into_response()
+        }
+        JournalError::Db(_) | JournalError::BadData(_) => AppError::INTERNAL.into_response(),
+    }
+}
+
+/// `GET /api/v1/journal`: snapshot terbaru ([`api_types::journal::Snapshot`]).
+#[worker::send]
+pub async fn journal_get(State(config): State<Arc<Config>>) -> Result<Response, AppError> {
+    let client = db_client(&config, "journal")?;
+    match journal::latest(&client).await {
+        Ok(Some(snapshot)) => {
+            let mut res = Json(snapshot).into_response();
+            res.headers_mut().insert(
+                header::CACHE_CONTROL,
+                HeaderValue::from_static(JOURNAL_CACHE),
+            );
+            Ok(res)
+        }
+        Ok(None) => Err(AppError::NOT_READY),
+        Err(e) => {
+            worker::console_error!("journal: {e}");
+            Ok(journal_error(&e))
+        }
+    }
+}
+
+/// `POST /api/v1/admin/journal/refresh`: ambil dari GitHub sekarang, tanpa
+/// menunggu cron. Hanya admin; paling cepat sekali per menit.
+#[worker::send]
+pub async fn admin_journal_refresh(
+    State(config): State<Arc<Config>>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    if !admin::authorized(&config.admin_token, authorization(&headers)) {
+        return Err(AppError::UNAUTHORIZED);
+    }
+    if config.github_token.expose().is_empty() {
+        return Err(AppError::NOT_CONFIGURED);
+    }
+    let client = db_client(&config, "journal refresh")?;
+    let github = GithubClient::new(config.github_token.expose());
+    match journal::refresh_if_due(&client, &github, now_secs()).await {
+        Ok(done) => Ok(Json(done).into_response()),
+        Err(e) => {
+            if !matches!(e, JournalError::TooSoon { .. }) {
+                worker::console_error!("journal refresh: {e}");
+            }
+            Ok(journal_error(&e))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -431,6 +506,37 @@ mod tests {
         ] {
             assert!(parse_id(bad).is_err(), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn journal_errors_map_to_safe_statuses() {
+        let status = |e: JournalError| journal_error(&e).status();
+        assert_eq!(
+            status(JournalError::TooSoon {
+                retry_after_secs: 5
+            }),
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        assert_eq!(
+            status(JournalError::NotConfigured("GITHUB_TOKEN")),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(
+            status(JournalError::Upstream("HTTP 401".into())),
+            StatusCode::BAD_GATEWAY
+        );
+        assert_eq!(
+            status(JournalError::Db(Error::Transport("x".into()))),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(
+            status(JournalError::BadData("payload")),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+        let retry = journal_error(&JournalError::TooSoon {
+            retry_after_secs: 42,
+        });
+        assert_eq!(retry.headers()[header::RETRY_AFTER], "42");
     }
 
     #[test]

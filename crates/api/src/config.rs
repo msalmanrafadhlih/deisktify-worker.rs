@@ -54,6 +54,9 @@ pub struct Config {
     /// Token admin (`ADMIN_TOKEN`, secret). Kosong atau pendek = endpoint admin
     /// tertutup untuk semua orang (lihat `admin.rs`).
     pub admin_token: Secret,
+    /// Token GitHub untuk Cron Trigger jurnal (`GITHUB_TOKEN`, secret, scope
+    /// `read:user` cukup). Kosong = jurnal tidak bisa diperbarui.
+    pub github_token: Secret,
 }
 
 /// Daftar kata terlarang dipisah koma atau baris baru. Kosong dan terlalu
@@ -107,6 +110,7 @@ impl Config {
             rate_salt: Secret::default(),
             banned_words: Vec::new(),
             admin_token: Secret::default(),
+            github_token: Secret::default(),
         }
     }
 
@@ -114,6 +118,13 @@ impl Config {
     #[must_use]
     pub fn with_admin(mut self, token: Option<&str>) -> Self {
         self.admin_token = Secret::new(token.map(str::trim).unwrap_or_default());
+        self
+    }
+
+    /// Token GitHub untuk jurnal (opsional).
+    #[must_use]
+    pub fn with_github(mut self, token: Option<&str>) -> Self {
+        self.github_token = Secret::new(token.map(str::trim).unwrap_or_default());
         self
     }
 
@@ -141,9 +152,12 @@ impl Config {
         let banned = text("BANNED_WORDS");
         // Hanya secret: token admin tidak boleh jatuh ke `[vars]` yang ada di repo.
         let admin = env.secret("ADMIN_TOKEN").map(|v| v.to_string()).ok();
+        // Hanya secret, sama alasannya.
+        let github = env.secret("GITHUB_TOKEN").map(|v| v.to_string()).ok();
         Self::from_values(origins.as_deref(), url.as_deref(), token.as_deref())
             .with_chat(salt.as_deref(), banned.as_deref())
             .with_admin(admin.as_deref())
+            .with_github(github.as_deref())
     }
 }
 
@@ -209,6 +223,15 @@ mod tests {
         let c = c.with_admin(Some("  tok-tok-tok  "));
         assert_eq!(c.admin_token.expose(), "tok-tok-tok");
         assert!(!format!("{c:?}").contains("tok-tok-tok"));
+    }
+
+    #[test]
+    fn the_github_token_defaults_to_empty_and_stays_out_of_debug_output() {
+        let c = Config::from_values(None, None, None);
+        assert_eq!(c.github_token.expose(), "");
+        let c = c.with_github(Some("  ghp_tok-tok  "));
+        assert_eq!(c.github_token.expose(), "ghp_tok-tok");
+        assert!(!format!("{c:?}").contains("ghp_tok-tok"));
     }
 
     #[test]

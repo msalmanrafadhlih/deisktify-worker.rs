@@ -10,6 +10,11 @@ compatibility_date = "2026-10-01"
 command = "worker-build --release"
 watch_dir = "src"
 
+[triggers]
+# Ambil statistik GitHub untuk halaman /profile tiap 6 jam (UTC). Plan gratis:
+# maksimal 5 cron per akun dan CPU 10 ms per eksekusi. Butuh secret GITHUB_TOKEN.
+crons = ["0 */6 * * *"]
+
 [vars]
 # Origin browser yang boleh memanggil API, dipisah koma. Persis: skema + host
 # (+ port), tanpa path, tanpa wildcard. Origin yang tidak valid dibuang.
@@ -20,4 +25,5 @@ ALLOWED_ORIGINS = "https://tquilla.is-a.dev"
 #   npx wrangler secret put TURSO_DATABASE_URL     (atau isi sebagai [vars] di sini)
 #   npx wrangler secret put RATE_LIMIT_SALT        (openssl rand -hex 32)
 #   npx wrangler secret put ADMIN_TOKEN            (openssl rand -hex 32; kosong = admin mati)
+#   npx wrangler secret put GITHUB_TOKEN           (token GitHub, scope read:user; untuk cron jurnal)
 # Untuk `wrangler dev`, isi crates/api/.dev.vars (lihat .dev.vars.example).

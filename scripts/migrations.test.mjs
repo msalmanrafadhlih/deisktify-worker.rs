@@ -52,7 +52,8 @@ test("all migrations apply to an empty database", () => {
     .map((r) => r.name);
   assert.deepEqual(tables, [
     "bookmarks", "chat_messages", "chat_rate_limits", "embience_preset_items", "embience_presets",
-    "embiences", "generations", "journal_snapshots", "message_reports", "radio_stations",
+    "embiences", "generations", "journal_pinned_repos", "journal_profile", "journal_snapshots",
+    "journal_stack", "message_reports", "radio_stations",
   ]);
 });
 
@@ -103,6 +104,21 @@ const rejected = [
   ["malformed timestamp", "INSERT INTO chat_messages (username, message, created_at) VALUES ('u', 'm', 'yesterday')"],
   ["invalid JSON snapshot", "INSERT INTO journal_snapshots (payload, fetched_at) VALUES ('{nope', '2026-01-01T00:00:00Z')"],
   ["unknown snapshot source", "INSERT INTO journal_snapshots (payload, source, fetched_at) VALUES ('{}', 'x', '2026-01-01T00:00:00Z')"],
+  ["second journal profile row", "INSERT INTO journal_profile (id, github_username) VALUES (2, 'other')"],
+  ["journal username with a space", "UPDATE journal_profile SET github_username = 'a b'"],
+  ["journal username with a quote", "UPDATE journal_profile SET github_username = 'a\"b'"],
+  ["journal username too long", `UPDATE journal_profile SET github_username = '${"a".repeat(40)}'`],
+  ["empty journal username", "UPDATE journal_profile SET github_username = ''"],
+  ["pinned repo with a quote", "INSERT INTO journal_pinned_repos (repo_name) VALUES ('x\") { y }')"],
+  ["pinned repo with a slash", "INSERT INTO journal_pinned_repos (repo_name) VALUES ('a/b')"],
+  ["pinned repo with a space", "INSERT INTO journal_pinned_repos (repo_name) VALUES ('a b')"],
+  ["empty pinned repo", "INSERT INTO journal_pinned_repos (repo_name) VALUES ('')"],
+  ["pinned repo too long", `INSERT INTO journal_pinned_repos (repo_name) VALUES ('${"a".repeat(101)}')`],
+  ["duplicate pinned repo", "INSERT INTO journal_pinned_repos (repo_name) VALUES ('flexinix')"],
+  ["empty pinned topic", "INSERT INTO journal_pinned_repos (repo_name, topic) VALUES ('new-one', '')"],
+  ["pinned topic too long", `INSERT INTO journal_pinned_repos (repo_name, topic) VALUES ('new-one', '${"t".repeat(61)}')`],
+  ["empty stack name", "INSERT INTO journal_stack (name) VALUES ('')"],
+  ["duplicate stack name", "INSERT INTO journal_stack (name) VALUES ('Rust')"],
   ["preset item with unknown ids", "INSERT INTO embience_preset_items (preset_id, embience_id) VALUES (99, 99)"],
 ];
 
@@ -328,4 +344,90 @@ test("API queries are bounded", () => {
     assert.match(sql, /\bLIMIT\s+(\d+|\?\d+)\s*$/im, name);
     assert.match(sql, /\bORDER BY\b/i, name);
   }
+});
+
+// ---- Journal (D5): pengaturan, snapshot, pemangkasan
+
+test("journal settings start with the old Worker's account, repositories and stack", () => {
+  const db = freshDb();
+  assert.equal(db.prepare("SELECT github_username AS u FROM journal_profile").get().u, "msalmanrafadhlih");
+  assert.deepEqual(
+    query(db, "journal_pinned").map((r) => r.repo_name),
+    ["flexinix", "racooonfig", "template.nix", "fastfetch.md", "tquilla.is-a.bot", "pocket-ai.gemini"],
+  );
+  assert.deepEqual(query(db, "journal_stack").map((r) => r.name), ["NixOS", "Rust", "Helix", "Figma", "Canva"]);
+  assert.deepEqual(Object.keys(query(db, "journal_pinned")[0]), ["repo_name", "topic"]);
+});
+
+test("journal settings are not part of the seeds (a seed rerun would resurrect deleted rows)", () => {
+  const db = freshDb();
+  db.exec("DELETE FROM journal_pinned_repos WHERE repo_name = 'flexinix'");
+  db.exec("DELETE FROM journal_stack WHERE name = 'Canva'");
+  for (let round = 0; round < 2; round++) for (const s of sqlFiles("seeds")) db.exec(s.sql);
+  assert.equal(count(db, "journal_pinned_repos"), 5);
+  assert.equal(count(db, "journal_stack"), 4);
+});
+
+test("journal settings are ordered by position, then id; edits are plain row changes", () => {
+  const db = freshDb();
+  db.exec("UPDATE journal_pinned_repos SET position = 0 WHERE repo_name = 'pocket-ai.gemini'");
+  db.exec("INSERT INTO journal_pinned_repos (position, repo_name, topic) VALUES (0, 'zz-new', NULL)");
+  const names = query(db, "journal_pinned").map((r) => r.repo_name);
+  assert.deepEqual(names.slice(0, 2), ["pocket-ai.gemini", "zz-new"]);
+  assert.equal(query(db, "journal_pinned").find((r) => r.repo_name === "zz-new").topic, null);
+  db.exec("UPDATE journal_profile SET github_username = 'someone-else'");
+  assert.equal(query(db, "journal_profile")[0].github_username, "someone-else");
+});
+
+const insertSnapshot = (db, at, source = "github", payload = "{}") =>
+  db.prepare(sqlOf("journal_insert").replace("'github'", "?3")).run(payload, at, source);
+
+test("journal queries: latest snapshot wins by fetched_at, then id", () => {
+  const db = freshDb();
+  assert.deepEqual(query(db, "journal_latest"), []);
+  insertSnapshot(db, "2026-10-20T06:00:00Z", "github", '{"n":1}');
+  insertSnapshot(db, "2026-10-20T12:00:00Z", "github", '{"n":2}');
+  insertSnapshot(db, "2026-10-20T12:00:00Z", "github", '{"n":3}');
+  insertSnapshot(db, "2026-10-19T00:00:00Z", "github", '{"n":4}');
+  const [row] = query(db, "journal_latest");
+  assert.deepEqual({ ...row }, { payload: '{"n":3}', source: "github", fetched_at: "2026-10-20T12:00:00Z" });
+  assert.deepEqual(query(db, "journal_latest_time").map((r) => ({ ...r })), [{ fetched_at: "2026-10-20T12:00:00Z" }]);
+});
+
+test("journal insert only ever writes source 'github' and rejects bad timestamps", () => {
+  const db = freshDb();
+  db.prepare(sqlOf("journal_insert")).run("{}", "2026-10-20T12:00:00Z");
+  assert.equal(db.prepare("SELECT source FROM journal_snapshots").get().source, "github");
+  assert.throws(() => db.prepare(sqlOf("journal_insert")).run("{}", "yesterday"), /constraint/i);
+  assert.throws(() => db.prepare(sqlOf("journal_insert")).run("{nope", "2026-10-20T12:00:00Z"), /constraint/i);
+});
+
+test("journal prune keeps the newest N github snapshots and never touches seed rows", () => {
+  const db = freshDb();
+  insertSnapshot(db, "1970-01-01T00:00:00Z", "seed");
+  for (let i = 0; i < 40; i++) {
+    const hh = String(i % 24).padStart(2, "0");
+    const dd = String(1 + Math.floor(i / 24)).padStart(2, "0");
+    insertSnapshot(db, `2026-10-${dd}T${hh}:00:00Z`);
+  }
+  db.prepare(sqlOf("journal_prune")).run(28);
+  assert.equal(db.prepare("SELECT count(*) AS n FROM journal_snapshots WHERE source = 'github'").get().n, 28);
+  assert.equal(db.prepare("SELECT count(*) AS n FROM journal_snapshots WHERE source = 'seed'").get().n, 1);
+  const oldest = db.prepare("SELECT min(fetched_at) AS t FROM journal_snapshots WHERE source = 'github'").get().t;
+  assert.equal(oldest, "2026-10-01T12:00:00Z");
+  // Menjalankannya lagi tidak mengubah apa pun.
+  db.prepare(sqlOf("journal_prune")).run(28);
+  assert.equal(count(db, "journal_snapshots"), 29);
+});
+
+test("the sample journal snapshot has the current payload shape (no markup fields)", () => {
+  const db = seededDb();
+  const payload = JSON.parse(db.prepare("SELECT payload FROM journal_snapshots").get().payload);
+  assert.deepEqual(Object.keys(payload).sort(), ["chronicle", "hero", "pinned"]);
+  const c = payload.chronicle;
+  assert.equal(c.monthly_focus_html, undefined);
+  assert.equal(c.growth_percentage, undefined);
+  assert.equal(typeof c.growth_percent, "number");
+  assert.ok(Array.isArray(c.timeline) && c.timeline.every((d) => /^\d{4}-\d{2}-\d{2}$/.test(d.date)));
+  assert.ok(c.languages.every((l) => /^#[0-9a-f]{6}$/.test(l.color)));
 });

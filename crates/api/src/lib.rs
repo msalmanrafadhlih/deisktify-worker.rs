@@ -8,6 +8,9 @@
 //! - `content`/`routes`: endpoint baca konten (D3): query + validasi, lalu handler
 //! - `chat`  : Guestbook (D4): validasi, pembatas kecepatan, baca/tulis/laporkan/hapus
 //! - `admin` : otorisasi admin lewat `ADMIN_TOKEN`
+//! - `journal`/`github`: GitHub Journal (D5): Cron Trigger mengambil statistik dari
+//!   GitHub, `GET /journal` membaca snapshot terakhir
+//! - `time`  : waktu UTC tanpa dependensi tanggal
 //!
 //! Kode di crate ini harus compile ke wasm32 (tanpa tokio, tanpa thread).
 
@@ -18,8 +21,11 @@ pub mod content;
 pub mod cors;
 pub mod db;
 pub mod error;
+pub mod github;
 pub mod health;
+pub mod journal;
 pub mod routes;
+pub mod time;
 
 use std::sync::Arc;
 
@@ -57,6 +63,11 @@ pub fn app(config: Arc<Config>) -> Router {
             api_types::paths::ADMIN_MESSAGE,
             delete(routes::admin_delete),
         )
+        .route(api_types::paths::JOURNAL, get(routes::journal_get))
+        .route(
+            api_types::paths::ADMIN_JOURNAL_REFRESH,
+            post(routes::admin_journal_refresh),
+        )
         .fallback(error::not_found)
         .method_not_allowed_fallback(error::method_not_allowed)
         .with_state(config)
@@ -74,6 +85,20 @@ async fn fetch(
     console_error_panic_hook::set_once();
     let config = Arc::new(Config::from_env(&env));
     Ok(app(config).call(req).await?)
+}
+
+/// Cron Trigger (`[triggers] crons` di wrangler.toml): ambil statistik GitHub
+/// dan simpan sebagai snapshot jurnal. Gagal = snapshot lama tetap dipakai;
+/// hasilnya hanya masuk log Worker.
+#[event(scheduled)]
+async fn scheduled(_event: worker::ScheduledEvent, env: Env, _ctx: worker::ScheduleContext) {
+    console_error_panic_hook::set_once();
+    let config = Config::from_env(&env);
+    let now_secs = i64::try_from(worker::Date::now().as_millis() / 1000).unwrap_or(0);
+    match journal::run(&config, now_secs).await {
+        Ok(done) => worker::console_log!("journal: refreshed at {}", done.fetched_at),
+        Err(e) => worker::console_error!("journal: refresh failed: {e}"),
+    }
 }
 
 #[cfg(test)]
@@ -137,6 +162,7 @@ mod tests {
                 api_types::paths::RADIO,
                 api_types::paths::EMBIENCES,
                 api_types::paths::PRESETS,
+                api_types::paths::JOURNAL,
             ] {
                 let (status, headers, json) =
                     call(req(Method::GET, path).body(Body::empty()).unwrap()).await;
@@ -579,6 +605,95 @@ mod tests {
                 .to_str()
                 .unwrap();
             assert!(!methods.contains("DELETE"), "{methods}");
+            assert!(
+                !allowed_headers.contains("authorization"),
+                "{allowed_headers}"
+            );
+        });
+    }
+    // ----------------------------------------------------------- jurnal (D5)
+
+    fn with_admin_and_github() -> Arc<Config> {
+        Arc::new(
+            Config::from_values(Some(SITE), None, None)
+                .with_admin(Some(ADMIN))
+                .with_github(Some("ghp_test")),
+        )
+    }
+
+    #[test]
+    fn the_journal_is_read_only_and_public() {
+        futures_executor::block_on(async {
+            for method in [Method::POST, Method::PUT, Method::DELETE] {
+                let (status, _, json) = call(
+                    req(method, api_types::paths::JOURNAL)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await;
+                assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+                assert_eq!(json["error"]["code"], "method_not_allowed");
+            }
+        });
+    }
+
+    #[test]
+    fn manual_journal_refresh_is_admin_only_and_post_only() {
+        futures_executor::block_on(async {
+            let path = api_types::paths::ADMIN_JOURNAL_REFRESH;
+            for cfg in [config(), with_admin(), with_admin_and_github()] {
+                for token in [None, Some("wrong"), Some("")] {
+                    let (status, _, json) =
+                        call_with(cfg.clone(), admin_req(Method::POST, path, token)).await;
+                    assert_eq!(status, StatusCode::UNAUTHORIZED, "{token:?}");
+                    assert_eq!(json["error"]["code"], "unauthorized");
+                }
+            }
+            for method in [Method::GET, Method::PUT, Method::DELETE] {
+                let (status, _, _) =
+                    call_with(with_admin(), admin_req(method, path, Some(ADMIN))).await;
+                assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+            }
+        });
+    }
+
+    #[test]
+    fn manual_refresh_needs_the_github_token_and_then_the_database() {
+        futures_executor::block_on(async {
+            let path = api_types::paths::ADMIN_JOURNAL_REFRESH;
+            // Admin sah, tetapi GITHUB_TOKEN belum diisi.
+            let (status, _, json) =
+                call_with(with_admin(), admin_req(Method::POST, path, Some(ADMIN))).await;
+            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(json["error"]["message"], "This feature is not configured.");
+            // Keduanya ada, database tidak.
+            let (status, _, json) = call_with(
+                with_admin_and_github(),
+                admin_req(Method::POST, path, Some(ADMIN)),
+            )
+            .await;
+            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(json["error"]["code"], "unavailable");
+            assert!(!json.to_string().contains("ghp_test"));
+        });
+    }
+
+    #[test]
+    fn browsers_cannot_be_granted_journal_refresh_through_cors() {
+        futures_executor::block_on(async {
+            let (status, headers, _) = call(
+                req(Method::OPTIONS, api_types::paths::ADMIN_JOURNAL_REFRESH)
+                    .header(header::ORIGIN, SITE)
+                    .header(header::ACCESS_CONTROL_REQUEST_METHOD, "POST")
+                    .header(header::ACCESS_CONTROL_REQUEST_HEADERS, "authorization")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+            assert_eq!(status, StatusCode::NO_CONTENT);
+            let allowed_headers = headers[header::ACCESS_CONTROL_ALLOW_HEADERS]
+                .to_str()
+                .unwrap();
             assert!(
                 !allowed_headers.contains("authorization"),
                 "{allowed_headers}"

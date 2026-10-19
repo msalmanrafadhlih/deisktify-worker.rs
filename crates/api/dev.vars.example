@@ -18,3 +18,8 @@ BANNED_WORDS=
 # Di production: `npx wrangler secret put ADMIN_TOKEN` (min. 32 karakter,
 # `openssl rand -hex 32`). Lokal boleh diisi string acak panjang.
 ADMIN_TOKEN=
+# Cron jurnal GitHub (D5). Di production: `npx wrangler secret put GITHUB_TOKEN`
+# (scope read:user cukup). Lokal: kosong boleh; isi bila mau mencoba
+# `POST /api/v1/admin/journal/refresh` (butuh ADMIN_TOKEN di atas) atau
+# `wrangler dev --test-scheduled` lalu `curl "http://127.0.0.1:8787/__scheduled"`.
+GITHUB_TOKEN=

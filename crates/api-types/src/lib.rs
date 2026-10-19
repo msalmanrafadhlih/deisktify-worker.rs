@@ -12,6 +12,8 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod journal;
+
 /// Awalan semua endpoint versi 1.
 pub const API_PREFIX: &str = "/api/v1";
 
@@ -44,6 +46,12 @@ pub mod paths {
     /// Axum; pemanggil memakai [`admin_message`].
     pub const ADMIN_MESSAGE: &str = "/api/v1/admin/messages/{id}";
 
+    /// `GET`: data GitHub Journal terbaru ([`crate::journal::Snapshot`]).
+    pub const JOURNAL: &str = "/api/v1/journal";
+    /// `POST`: ambil data baru dari GitHub sekarang, tanpa menunggu cron. Hanya
+    /// admin (`Authorization: Bearer`), tidak untuk browser.
+    pub const ADMIN_JOURNAL_REFRESH: &str = "/api/v1/admin/journal/refresh";
+
     /// Semua path; tambahkan endpoint baru di sini juga supaya test prefix mencakupnya.
     pub const ALL: &[&str] = &[
         HEALTH,
@@ -56,6 +64,8 @@ pub mod paths {
         MESSAGE_REPORT,
         ADMIN_REPORTS,
         ADMIN_MESSAGE,
+        JOURNAL,
+        ADMIN_JOURNAL_REFRESH,
     ];
 
     /// Path `POST` untuk melaporkan entri `id`.
@@ -377,7 +387,7 @@ pub mod chat {
 
     /// Karakter kontrol dan karakter tak terlihat/pembalik arah teks
     /// (zero-width, U+202E, dst.) yang dipakai untuk menyamar.
-    fn hidden(c: char) -> bool {
+    pub(crate) fn hidden(c: char) -> bool {
         c.is_control()
             || matches!(
                 c,

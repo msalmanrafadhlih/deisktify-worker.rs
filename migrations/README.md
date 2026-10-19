@@ -13,6 +13,7 @@ pemisah), mis. `0001_generations.sql`. Tabel pertama datang di tahap D2.
 | `journal_snapshots` | `0006_journal_snapshots.sql` |
 | `chat_rate_limits` (pembatas kecepatan chat) | `0007_chat_rate_limits.sql` |
 | `chat_messages.deleted_at`, `message_reports` (moderasi Guestbook) | `0008_chat_moderation.sql` |
+| `journal_profile`, `journal_pinned_repos`, `journal_stack` (pengaturan jurnal, nilai awal ikut di migrasi) | `0009_journal_config.sql` |
 
 ## Aturan
 
@@ -63,8 +64,12 @@ node scripts/gen_seed.mjs   # seeds/source -> seeds
 ```
 
 - `0001_content.sql`: generations, bookmarks, radio, embience dan preset (konten situs).
-- `0002_samples.sql`: pesan chat contoh dan satu snapshot jurnal (`source = 'seed'`).
-  Hanya untuk dev/demo.
+- `0002_samples.sql`: pesan chat contoh dan satu snapshot jurnal (`source = 'seed'`,
+  bentuk payload sama dengan `api_types::journal::Data`). Hanya untuk dev/demo.
+
+Pengaturan yang bisa diedit admin (mis. `journal_*` dari `0009`) **tidak** diisi lewat seed:
+seed dijalankan ulang tiap rilis dan akan menghidupkan lagi baris yang sudah dihapus.
+Nilai awalnya ditulis di migrasi (yang hanya jalan sekali).
 
 Semua `INSERT OR IGNORE` dengan id eksplisit: dijalankan ulang tidak menggandakan baris
 dan tidak menimpa data yang sudah diubah. Skrip menolak URL tidak valid dan nama
