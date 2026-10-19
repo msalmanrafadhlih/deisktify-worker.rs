@@ -1,4 +1,7 @@
-//! Live Chat (D4a): membaca dan mengirim pesan.
+//! Guestbook (dulu Live Chat, D4a/D4b): membaca, menulis, melaporkan, dan
+//! (admin) menghapus entri. Nama tabel dan rute tetap `chat_messages` dan
+//! `/messages`: mengganti nama keduanya akan mematahkan Worker lama selama
+//! penerapan (migrasi jalan sebelum Worker baru dideploy).
 //!
 //! Seperti `content.rs`, logika di sini murni terhadap [`Client`] sehingga dites
 //! dengan transport palsu; handler HTTP (yang menyentuh `fetch` dan `Date` Workers)
@@ -12,7 +15,7 @@
 
 use api_types::chat::{self, Reject};
 use api_types::validate::is_http_url;
-use api_types::{limits, ChatMessage, NewMessage};
+use api_types::{limits, ChatMessage, NewMessage, ReportedMessage};
 use sha2::{Digest, Sha256};
 use turso_http::{Client, Error, Stmt, StmtResult, Transport, Value};
 
@@ -20,13 +23,20 @@ use crate::content::{self, ContentError};
 
 const RECENT: &str = include_str!("queries/messages_recent.sql");
 const AFTER: &str = include_str!("queries/messages_after.sql");
+const BEFORE: &str = include_str!("queries/messages_before.sql");
 const INSERT: &str = include_str!("queries/messages_insert.sql");
 const RATE_HIT: &str = include_str!("queries/rate_hit.sql");
 const RATE_CLEANUP: &str = include_str!("queries/rate_cleanup.sql");
+const REPORT_COUNT: &str = include_str!("queries/report_count.sql");
+const REPORT_INSERT: &str = include_str!("queries/report_insert.sql");
+const REPORTS_LIST: &str = include_str!("queries/reports_list.sql");
+const MESSAGE_DELETE: &str = include_str!("queries/message_delete.sql");
 
-/// Pesan per pengirim: per menit dan per jam (jendela tetap).
+/// Entri per pengirim: per menit dan per jam (jendela tetap).
 pub const PER_MINUTE: i64 = 5;
 pub const PER_HOUR: i64 = 40;
+/// Laporan per pengirim dalam satu jam terakhir (jendela bergeser).
+pub const REPORTS_PER_HOUR: i64 = 20;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChatError {
@@ -69,24 +79,29 @@ impl From<ContentError> for ChatError {
 
 // ------------------------------------------------------------------ membaca
 
-/// Parameter `GET /messages`.
+/// Parameter `GET /messages`. `after` dan `before` tidak boleh dipakai bersamaan.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ListQuery {
-    /// Hanya pesan dengan id lebih besar dari ini (untuk polling).
+    /// Hanya entri dengan id lebih besar dari ini (menyegarkan daftar).
     pub after: Option<u32>,
+    /// Hanya entri dengan id lebih kecil dari ini (halaman lebih lama).
+    pub before: Option<u32>,
     pub limit: u32,
 }
 
 /// Mem-parsing query string (`after=12&limit=30`). `None` jika nilainya tidak
-/// valid; parameter yang tidak dikenal diabaikan.
+/// valid atau `after` dan `before` dipakai bersamaan; parameter yang tidak
+/// dikenal diabaikan.
 pub fn parse_list_query(raw: Option<&str>) -> Option<ListQuery> {
     let mut after = None;
+    let mut before = None;
     let mut limit = limits::MESSAGES_DEFAULT_LIMIT;
     for pair in raw.unwrap_or("").split('&').filter(|p| !p.is_empty()) {
         let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
         let digits = !value.is_empty() && value.bytes().all(|b| b.is_ascii_digit());
         match key {
             "after" => after = Some(value.parse::<u32>().ok().filter(|_| digits)?),
+            "before" => before = Some(value.parse::<u32>().ok().filter(|_| digits)?),
             "limit" => {
                 limit = value
                     .parse::<u32>()
@@ -96,40 +111,43 @@ pub fn parse_list_query(raw: Option<&str>) -> Option<ListQuery> {
             _ => {}
         }
     }
-    Some(ListQuery { after, limit })
-}
-
-fn https_only(url: Option<String>) -> Option<String> {
-    url.filter(|u| u.starts_with("https://") && is_http_url(u))
+    if after.is_some() && before.is_some() {
+        return None;
+    }
+    Some(ListQuery {
+        after,
+        before,
+        limit,
+    })
 }
 
 fn http_only(url: Option<String>) -> Option<String> {
     url.filter(|u| is_http_url(u))
 }
 
-/// Satu baris -> pesan. Isi database dianggap tidak sepenuhnya tepercaya:
-/// tautan yang tidak lolos dibuang dari pesan (pesannya tetap tampil).
+/// Satu baris -> entri. Isi database dianggap tidak sepenuhnya tepercaya:
+/// tautan yang tidak lolos dibuang dari entri (teksnya tetap tampil).
 fn message_row(res: &StmtResult, row: usize) -> Result<ChatMessage, ChatError> {
     Ok(ChatMessage {
         id: content::id(res, row, "id")?,
         username: content::text(res, row, "username")?,
         url: http_only(content::opt_text(res, row, "url")?),
-        avatar_url: https_only(content::opt_text(res, row, "avatar_url")?),
         message: content::text(res, row, "message")?,
-        attachment_url: https_only(content::opt_text(res, row, "attachment_url")?),
         created_at: content::text(res, row, "created_at")?,
     })
 }
 
-/// Pesan terbaru (tanpa `after`) atau yang lebih baru dari `after`; selalu
-/// urut dari yang paling lama.
+/// Entri terbaru (tanpa parameter), yang lebih baru dari `after`, atau satu
+/// halaman yang lebih lama dari `before`; selalu urut dari yang paling lama.
+/// Entri yang sudah dihapus admin tidak pernah ikut.
 pub async fn list<T: Transport>(
     client: &Client<T>,
     q: &ListQuery,
 ) -> Result<Vec<ChatMessage>, ChatError> {
-    let stmt = match q.after {
-        Some(after) => Stmt::new(AFTER).bind(after).bind(q.limit),
-        None => Stmt::new(RECENT).bind(q.limit),
+    let stmt = match (q.after, q.before) {
+        (Some(after), _) => Stmt::new(AFTER).bind(after).bind(q.limit),
+        (None, Some(before)) => Stmt::new(BEFORE).bind(before).bind(q.limit),
+        (None, None) => Stmt::new(RECENT).bind(q.limit),
     };
     let res = client.execute(stmt).await?;
     (0..res.rows.len()).map(|i| message_row(&res, i)).collect()
@@ -255,6 +273,81 @@ pub async fn submit<T: Transport>(
     message_row(first, 0)
 }
 
+// ------------------------------------------------------------------ moderasi
+
+/// Laporan pembaca. Satu pengirim dihitung sekali per entri (kunci utama tabel),
+/// dan dibatasi [`REPORTS_PER_HOUR`] per jam supaya satu orang tidak bisa
+/// membanjiri antrean admin. Jawabannya sama untuk entri yang tidak ada,
+/// sudah dihapus, atau sudah pernah dilaporkan: pelapor tidak diberi tahu
+/// mana yang terjadi. Tidak ada sembunyi-otomatis; hanya admin yang menghapus.
+pub async fn report<T: Transport>(
+    client: &Client<T>,
+    sender: &Sender<'_>,
+    id: u32,
+) -> Result<(), ChatError> {
+    let reporter = ip_key(sender.ip, sender.salt);
+    let since = format_utc(sender.now_secs - 3600);
+    let res = client
+        .execute(Stmt::new(REPORT_COUNT).bind(reporter.as_str()).bind(since))
+        .await?;
+    let recent = res
+        .get(0, "n")
+        .and_then(Value::as_i64)
+        .ok_or(ChatError::BadData("n"))?;
+    if recent >= REPORTS_PER_HOUR {
+        return Err(ChatError::RateLimited {
+            retry_after_secs: 600,
+        });
+    }
+    client
+        .execute(
+            Stmt::new(REPORT_INSERT)
+                .bind(id)
+                .bind(reporter)
+                .bind(format_utc(sender.now_secs))
+                .no_rows(),
+        )
+        .await?;
+    Ok(())
+}
+
+/// Entri yang dilaporkan, paling banyak dilaporkan dulu (hanya untuk admin).
+pub async fn reported<T: Transport>(client: &Client<T>) -> Result<Vec<ReportedMessage>, ChatError> {
+    let res = client
+        .execute(Stmt::new(REPORTS_LIST).bind(limits::REPORTS_LIMIT))
+        .await?;
+    (0..res.rows.len())
+        .map(|row| {
+            Ok(ReportedMessage {
+                id: content::id(&res, row, "id")?,
+                username: content::text(&res, row, "username")?,
+                url: http_only(content::opt_text(&res, row, "url")?),
+                message: content::text(&res, row, "message")?,
+                created_at: content::text(&res, row, "created_at")?,
+                reports: content::id(&res, row, "reports")?,
+                last_reported_at: content::text(&res, row, "last_reported_at")?,
+            })
+        })
+        .collect()
+}
+
+/// Menyembunyikan sebuah entri (soft delete). `true` jika entri itu ada dan
+/// belum dihapus. Barisnya tetap di database untuk ditinjau.
+pub async fn hide<T: Transport>(
+    client: &Client<T>,
+    id: u32,
+    now_secs: i64,
+) -> Result<bool, ChatError> {
+    let res = client
+        .execute(
+            Stmt::new(MESSAGE_DELETE)
+                .bind(id)
+                .bind(format_utc(now_secs)),
+        )
+        .await?;
+    Ok(!res.rows.is_empty())
+}
+
 // --------------------------------------------------------------------- waktu
 
 /// Detik Unix -> `YYYY-MM-DDTHH:MM:SSZ` (UTC), tanpa dependensi tanggal.
@@ -372,24 +465,14 @@ mod tests {
         execute_reply(result(&["hits"], &[vec![json!(n)]]))
     }
 
-    const MSG_COLS: [&str; 7] = [
-        "id",
-        "username",
-        "url",
-        "avatar_url",
-        "message",
-        "attachment_url",
-        "created_at",
-    ];
+    const MSG_COLS: [&str; 5] = ["id", "username", "url", "message", "created_at"];
 
-    fn msg_row(id: i64, user: &str, url: Json, avatar: Json, text: &str, att: Json) -> Vec<Json> {
+    fn msg_row(id: i64, user: &str, url: Json, text: &str) -> Vec<Json> {
         vec![
             json!(id),
             json!(user),
             url,
-            avatar,
             json!(text),
-            att,
             json!("2026-10-17T05:30:00Z"),
         ]
     }
@@ -447,6 +530,7 @@ mod tests {
             q(None),
             Some(ListQuery {
                 after: None,
+                before: None,
                 limit: 50
             })
         );
@@ -454,9 +538,19 @@ mod tests {
             q(Some("after=12&limit=30")),
             Some(ListQuery {
                 after: Some(12),
+                before: None,
                 limit: 30
             })
         );
+        assert_eq!(
+            q(Some("before=40&limit=20")),
+            Some(ListQuery {
+                after: None,
+                before: Some(40),
+                limit: 20
+            })
+        );
+        assert_eq!(q(Some("after=1&before=9")), None, "mutually exclusive");
         assert_eq!(q(Some("x=1&after=0")).unwrap().after, Some(0));
         assert_eq!(q(Some("limit=100")).unwrap().limit, 100);
         for bad in [
@@ -471,6 +565,9 @@ mod tests {
             "after=",
             "after=99999999999",
             "after",
+            "before=",
+            "before=-3",
+            "before=x",
         ] {
             assert_eq!(q(Some(bad)), None, "{bad}");
         }
@@ -537,12 +634,13 @@ mod tests {
 
     #[test]
     fn listing_without_after_uses_the_recent_query_and_after_uses_the_cursor_query() {
-        let rows = vec![msg_row(1, "a", json!(null), json!(null), "hi", json!(null))];
+        let rows = vec![msg_row(1, "a", json!(null), "hi")];
         let s = Script::new(vec![execute_reply(result(&MSG_COLS, &rows))]);
         let got = futures_executor::block_on(list(
             &client(&s),
             &ListQuery {
                 after: None,
+                before: None,
                 limit: 30,
             },
         ))
@@ -557,6 +655,7 @@ mod tests {
             &client(&s),
             &ListQuery {
                 after: Some(7),
+                before: None,
                 limit: 10,
             },
         ))
@@ -568,47 +667,59 @@ mod tests {
             (args[0]["value"].clone(), args[1]["value"].clone()),
             (json!("7"), json!("10"))
         );
+
+        let s = Script::new(vec![execute_reply(result(&MSG_COLS, &[]))]);
+        futures_executor::block_on(list(
+            &client(&s),
+            &ListQuery {
+                after: None,
+                before: Some(40),
+                limit: 20,
+            },
+        ))
+        .unwrap();
+        assert!(s.sql(0).contains("id < ?1"));
+        let args = &s.seen.borrow()[0]["requests"][0]["stmt"]["args"];
+        assert_eq!(
+            (args[0]["value"].clone(), args[1]["value"].clone()),
+            (json!("40"), json!("20"))
+        );
+    }
+
+    #[test]
+    fn every_public_read_query_hides_deleted_entries() {
+        for sql in [RECENT, AFTER, BEFORE] {
+            assert!(sql.contains("deleted_at IS NULL"), "{sql}");
+        }
     }
 
     #[test]
     fn rows_from_the_database_lose_unsafe_links_but_keep_the_message() {
-        let rows = vec![msg_row(
-            3,
-            "x",
-            json!("javascript:alert(1)"),
-            json!("http://insecure/avatar.png"),
-            "text",
-            json!("data:image/png;base64,AAAA"),
-        )];
+        let rows = vec![msg_row(3, "x", json!("javascript:alert(1)"), "text")];
         let s = Script::new(vec![execute_reply(result(&MSG_COLS, &rows))]);
         let got = futures_executor::block_on(list(
             &client(&s),
             &ListQuery {
                 after: None,
+                before: None,
                 limit: 5,
             },
         ))
         .unwrap();
         assert_eq!(got[0].message, "text");
-        assert_eq!(
-            (
-                got[0].url.clone(),
-                got[0].avatar_url.clone(),
-                got[0].attachment_url.clone()
-            ),
-            (None, None, None)
-        );
+        assert_eq!(got[0].url, None);
     }
 
     #[test]
     fn a_wrongly_typed_column_is_a_hard_error() {
-        let mut row = msg_row(1, "a", json!(null), json!(null), "hi", json!(null));
+        let mut row = msg_row(1, "a", json!(null), "hi");
         row[0] = json!("not a number");
         let s = Script::new(vec![execute_reply(result(&MSG_COLS, &[row]))]);
         let err = futures_executor::block_on(list(
             &client(&s),
             &ListQuery {
                 after: None,
+                before: None,
                 limit: 5,
             },
         ))
@@ -618,14 +729,7 @@ mod tests {
 
     #[test]
     fn a_normal_submit_checks_minute_then_hour_then_inserts_in_one_transaction() {
-        let row = msg_row(
-            9,
-            "moch",
-            json!("https://a.dev"),
-            json!(null),
-            "hello",
-            json!(null),
-        );
+        let row = msg_row(9, "moch", json!("https://a.dev"), "hello");
         let s = Script::new(vec![hits(1), hits(1), tx_reply(vec![row])]);
         let got = futures_executor::block_on(submit(&client(&s), &sender(), &clean())).unwrap();
         assert_eq!((got.id, got.username.as_str()), (9, "moch"));
@@ -678,7 +782,7 @@ mod tests {
 
     #[test]
     fn exactly_at_the_limit_is_still_allowed() {
-        let row = msg_row(1, "a", json!(null), json!(null), "x", json!(null));
+        let row = msg_row(1, "a", json!(null), "x");
         let s = Script::new(vec![hits(PER_MINUTE), hits(PER_HOUR), tx_reply(vec![row])]);
         assert!(futures_executor::block_on(submit(&client(&s), &sender(), &clean())).is_ok());
     }
@@ -696,5 +800,99 @@ mod tests {
         let s = Script::new(vec![hits(1), hits(1), tx_reply(vec![])]);
         let err = futures_executor::block_on(submit(&client(&s), &sender(), &clean())).unwrap_err();
         assert!(matches!(err, ChatError::BadData(_)));
+    }
+    // ----------------------------------------------------------- moderasi
+
+    fn count_reply(n: i64) -> Result<HttpResponse, String> {
+        execute_reply(result(&["n"], &[vec![json!(n)]]))
+    }
+
+    fn empty_reply() -> Result<HttpResponse, String> {
+        execute_reply(result(&["message_id"], &[]))
+    }
+
+    #[test]
+    fn a_report_counts_the_reporters_recent_reports_then_inserts_with_the_hash_not_the_ip() {
+        let s = Script::new(vec![count_reply(3), empty_reply()]);
+        futures_executor::block_on(report(&client(&s), &sender(), 12)).unwrap();
+        assert_eq!(s.requests(), 2);
+        assert!(s.sql(0).contains("message_reports"));
+        let count_args = s.seen.borrow()[0]["requests"][0]["stmt"]["args"].clone();
+        assert_eq!(count_args[0]["value"], ip_key("203.0.113.9", "pepper"));
+        // Jendela satu jam ke belakang dari "sekarang" (server).
+        assert_eq!(count_args[1]["value"], "2023-11-14T21:13:20Z");
+        let insert_args = s.seen.borrow()[1]["requests"][0]["stmt"]["args"].clone();
+        assert_eq!(insert_args[0]["value"], "12");
+        assert_eq!(insert_args[1]["value"], ip_key("203.0.113.9", "pepper"));
+        assert_eq!(insert_args[2]["value"], "2023-11-14T22:13:20Z");
+        assert!(!insert_args.to_string().contains("203.0.113.9"));
+    }
+
+    #[test]
+    fn a_reporter_over_the_hourly_limit_is_refused_before_anything_is_written() {
+        let s = Script::new(vec![count_reply(REPORTS_PER_HOUR)]);
+        let err = futures_executor::block_on(report(&client(&s), &sender(), 1)).unwrap_err();
+        assert!(matches!(err, ChatError::RateLimited { .. }));
+        assert_eq!(s.requests(), 1);
+        let s = Script::new(vec![count_reply(REPORTS_PER_HOUR - 1), empty_reply()]);
+        assert!(futures_executor::block_on(report(&client(&s), &sender(), 1)).is_ok());
+    }
+
+    #[test]
+    fn reporting_a_missing_or_already_reported_entry_looks_the_same_as_success() {
+        // INSERT OR IGNORE ... SELECT: tidak ada baris yang kembali, dan itu bukan error.
+        let s = Script::new(vec![count_reply(0), empty_reply()]);
+        assert!(futures_executor::block_on(report(&client(&s), &sender(), 999)).is_ok());
+    }
+
+    #[test]
+    fn a_report_that_cannot_reach_the_database_is_a_db_error() {
+        let s = Script::new(vec![Err("offline".into())]);
+        let err = futures_executor::block_on(report(&client(&s), &sender(), 1)).unwrap_err();
+        assert!(matches!(err, ChatError::Db(Error::Transport(_))));
+    }
+
+    #[test]
+    fn the_admin_list_is_bounded_and_drops_unsafe_links() {
+        let cols = [
+            "id",
+            "username",
+            "url",
+            "message",
+            "created_at",
+            "reports",
+            "last_reported_at",
+        ];
+        let rows = vec![vec![
+            json!(5),
+            json!("spam"),
+            json!("javascript:x"),
+            json!("buy"),
+            json!("2026-10-18T00:00:00Z"),
+            json!(3),
+            json!("2026-10-18T01:00:00Z"),
+        ]];
+        let s = Script::new(vec![execute_reply(result(&cols, &rows))]);
+        let got = futures_executor::block_on(reported(&client(&s))).unwrap();
+        assert_eq!(
+            (got[0].id, got[0].reports, got[0].url.clone()),
+            (5, 3, None)
+        );
+        let args = &s.seen.borrow()[0]["requests"][0]["stmt"]["args"];
+        assert_eq!(args[0]["value"], limits::REPORTS_LIMIT.to_string());
+    }
+
+    #[test]
+    fn hiding_reports_whether_an_entry_was_actually_hidden() {
+        let hit = execute_reply(result(&["id"], &[vec![json!(8)]]));
+        let s = Script::new(vec![hit]);
+        assert!(futures_executor::block_on(hide(&client(&s), 8, 1_700_000_000)).unwrap());
+        assert!(s.sql(0).starts_with("UPDATE chat_messages"));
+        let args = &s.seen.borrow()[0]["requests"][0]["stmt"]["args"];
+        assert_eq!(args[0]["value"], "8");
+        assert_eq!(args[1]["value"], "2023-11-14T22:13:20Z");
+
+        let s = Script::new(vec![execute_reply(result(&["id"], &[]))]);
+        assert!(!futures_executor::block_on(hide(&client(&s), 8, 1_700_000_000)).unwrap());
     }
 }

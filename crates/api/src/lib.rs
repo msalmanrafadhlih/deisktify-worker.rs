@@ -6,10 +6,12 @@
 //! - `db`    : transport `fetch` untuk `turso-http`
 //! - `health`: `GET /api/v1/health`
 //! - `content`/`routes`: endpoint baca konten (D3): query + validasi, lalu handler
-//! - `chat`  : Live Chat (D4a): validasi, pembatas kecepatan, baca/kirim pesan
+//! - `chat`  : Guestbook (D4): validasi, pembatas kecepatan, baca/tulis/laporkan/hapus
+//! - `admin` : otorisasi admin lewat `ADMIN_TOKEN`
 //!
 //! Kode di crate ini harus compile ke wasm32 (tanpa tokio, tanpa thread).
 
+pub mod admin;
 pub mod chat;
 pub mod config;
 pub mod content;
@@ -21,7 +23,12 @@ pub mod routes;
 
 use std::sync::Arc;
 
-use axum::{extract::DefaultBodyLimit, middleware, routing::get, Router};
+use axum::{
+    extract::DefaultBodyLimit,
+    middleware,
+    routing::{delete, get, post},
+    Router,
+};
 use tower_service::Service;
 use worker::{event, Context, Env, HttpRequest};
 
@@ -40,6 +47,15 @@ pub fn app(config: Arc<Config>) -> Router {
         .route(
             api_types::paths::MESSAGES,
             get(routes::messages_get).post(routes::messages_post),
+        )
+        .route(
+            api_types::paths::MESSAGE_REPORT,
+            post(routes::message_report),
+        )
+        .route(api_types::paths::ADMIN_REPORTS, get(routes::admin_reports))
+        .route(
+            api_types::paths::ADMIN_MESSAGE,
+            delete(routes::admin_delete),
         )
         .fallback(error::not_found)
         .method_not_allowed_fallback(error::method_not_allowed)
@@ -232,7 +248,7 @@ mod tests {
         });
     }
 
-    // ---------------------------------------------------------- Live Chat (D4a)
+    // ---------------------------------------------------------- Guestbook (D4)
 
     async fn call_with(
         cfg: Arc<Config>,
@@ -360,7 +376,14 @@ mod tests {
     #[test]
     fn listing_messages_validates_the_query_and_needs_the_database() {
         futures_executor::block_on(async {
-            for bad in ["limit=0", "limit=101", "after=x", "after=-1"] {
+            for bad in [
+                "limit=0",
+                "limit=101",
+                "after=x",
+                "after=-1",
+                "before=x",
+                "after=1&before=2",
+            ] {
                 let uri = format!("/api/v1/messages?{bad}");
                 let (status, _, json) =
                     call(req(Method::GET, &uri).body(Body::empty()).unwrap()).await;
@@ -387,6 +410,179 @@ mod tests {
                 assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
                 assert_eq!(json["error"]["code"], "method_not_allowed");
             }
+        });
+    }
+    // ------------------------------------------------- moderasi (D4b)
+
+    const ADMIN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    fn with_admin() -> Arc<Config> {
+        Arc::new(Config::from_values(Some(SITE), None, None).with_admin(Some(ADMIN)))
+    }
+
+    fn report_req(origin: Option<&str>, content_type: Option<&str>, id: &str) -> Request<Body> {
+        let mut b = req(Method::POST, &format!("/api/v1/messages/{id}/report"));
+        if let Some(o) = origin {
+            b = b.header(header::ORIGIN, o);
+        }
+        if let Some(c) = content_type {
+            b = b.header(header::CONTENT_TYPE, c);
+        }
+        b.body(Body::from("{}")).unwrap()
+    }
+
+    fn admin_req(method: Method, path: &str, token: Option<&str>) -> Request<Body> {
+        let mut b = req(method, path);
+        if let Some(t) = token {
+            b = b.header(header::AUTHORIZATION, format!("Bearer {t}"));
+        }
+        b.body(Body::empty()).unwrap()
+    }
+
+    #[test]
+    fn reporting_follows_the_same_origin_and_json_rules_as_writing() {
+        futures_executor::block_on(async {
+            let (status, _, json) = call(report_req(
+                Some("https://evil.example"),
+                Some("application/json"),
+                "3",
+            ))
+            .await;
+            assert_eq!(status, StatusCode::FORBIDDEN);
+            assert_eq!(json["error"]["code"], "forbidden");
+
+            for ct in [None, Some("text/plain"), Some("multipart/form-data")] {
+                let (status, _, _) = call(report_req(Some(SITE), ct, "3")).await;
+                assert_eq!(status, StatusCode::BAD_REQUEST, "{ct:?}");
+            }
+        });
+    }
+
+    #[test]
+    fn a_report_needs_a_plain_positive_id_and_then_the_database() {
+        futures_executor::block_on(async {
+            for bad in ["0", "x", "-1", "1.5", "99999999999"] {
+                let (status, _, json) =
+                    call(report_req(Some(SITE), Some("application/json"), bad)).await;
+                assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}");
+                assert_eq!(json["error"]["code"], "bad_request");
+            }
+            for origin in [Some(SITE), None] {
+                let (status, headers, json) =
+                    call(report_req(origin, Some("application/json"), "3")).await;
+                assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "no database");
+                assert_eq!(json["error"]["code"], "unavailable");
+                assert_eq!(headers[header::CACHE_CONTROL], "no-store");
+            }
+        });
+    }
+
+    #[test]
+    fn report_only_allows_post() {
+        futures_executor::block_on(async {
+            for method in [Method::GET, Method::PUT, Method::DELETE] {
+                let (status, _, _) = call(
+                    req(method, "/api/v1/messages/3/report")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await;
+                assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+            }
+        });
+    }
+
+    #[test]
+    fn admin_endpoints_are_closed_without_the_right_token() {
+        futures_executor::block_on(async {
+            for cfg in [config(), with_admin()] {
+                for token in [None, Some("wrong"), Some("")] {
+                    let (status, _, json) = call_with(
+                        cfg.clone(),
+                        admin_req(Method::GET, "/api/v1/admin/reports", token),
+                    )
+                    .await;
+                    assert_eq!(status, StatusCode::UNAUTHORIZED, "{token:?}");
+                    assert_eq!(json["error"]["code"], "unauthorized");
+                    let (status, _, _) = call_with(
+                        cfg.clone(),
+                        admin_req(Method::DELETE, "/api/v1/admin/messages/1", token),
+                    )
+                    .await;
+                    assert_eq!(status, StatusCode::UNAUTHORIZED, "{token:?}");
+                }
+            }
+            // Admin tidak dikonfigurasi: bahkan "token" yang sama dengan nilai
+            // kosong tidak membuka apa pun.
+            let (status, _, _) =
+                call(admin_req(Method::GET, "/api/v1/admin/reports", Some(ADMIN))).await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED);
+        });
+    }
+
+    #[test]
+    fn a_valid_admin_token_reaches_validation_and_then_the_database() {
+        futures_executor::block_on(async {
+            let (status, _, _) = call_with(
+                with_admin(),
+                admin_req(Method::GET, "/api/v1/admin/reports", Some(ADMIN)),
+            )
+            .await;
+            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "no database");
+
+            let (status, _, json) = call_with(
+                with_admin(),
+                admin_req(Method::DELETE, "/api/v1/admin/messages/abc", Some(ADMIN)),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(json["error"]["code"], "bad_request");
+
+            let (status, _, _) = call_with(
+                with_admin(),
+                admin_req(Method::DELETE, "/api/v1/admin/messages/7", Some(ADMIN)),
+            )
+            .await;
+            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "no database");
+        });
+    }
+
+    #[test]
+    fn the_token_is_checked_before_the_id_so_ids_cannot_be_probed() {
+        futures_executor::block_on(async {
+            let (status, _, _) = call_with(
+                with_admin(),
+                admin_req(Method::DELETE, "/api/v1/admin/messages/abc", None),
+            )
+            .await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED);
+        });
+    }
+
+    #[test]
+    fn browsers_cannot_be_granted_admin_access_through_cors() {
+        futures_executor::block_on(async {
+            let (status, headers, _) = call(
+                req(Method::OPTIONS, "/api/v1/admin/messages/1")
+                    .header(header::ORIGIN, SITE)
+                    .header(header::ACCESS_CONTROL_REQUEST_METHOD, "DELETE")
+                    .header(header::ACCESS_CONTROL_REQUEST_HEADERS, "authorization")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+            assert_eq!(status, StatusCode::NO_CONTENT);
+            let methods = headers[header::ACCESS_CONTROL_ALLOW_METHODS]
+                .to_str()
+                .unwrap();
+            let allowed_headers = headers[header::ACCESS_CONTROL_ALLOW_HEADERS]
+                .to_str()
+                .unwrap();
+            assert!(!methods.contains("DELETE"), "{methods}");
+            assert!(
+                !allowed_headers.contains("authorization"),
+                "{allowed_headers}"
+            );
         });
     }
 }

@@ -9,8 +9,12 @@ TURSO_AUTH_TOKEN=
 # `dx serve --package web` berjalan di 8080 (127.0.0.1 dan localhost adalah
 # origin yang berbeda bagi browser, daftarkan keduanya).
 ALLOWED_ORIGINS=http://127.0.0.1:8080,http://localhost:8080
-# Live Chat (D4a). Lokal boleh dikosongkan; di production isi lewat
+# Guestbook (D4). Lokal boleh dikosongkan; di production isi lewat
 # `npx wrangler secret put RATE_LIMIT_SALT` (string acak, `openssl rand -hex 32`).
 RATE_LIMIT_SALT=
 # Kata terlarang di chat, dipisah koma. Jangan taruh daftar aslinya di repo.
 BANNED_WORDS=
+# Endpoint admin (laporan, sembunyikan entri). Kosong = endpoint admin mati.
+# Di production: `npx wrangler secret put ADMIN_TOKEN` (min. 32 karakter,
+# `openssl rand -hex 32`). Lokal boleh diisi string acak panjang.
+ADMIN_TOKEN=

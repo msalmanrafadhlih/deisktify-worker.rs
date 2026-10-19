@@ -51,6 +51,9 @@ pub struct Config {
     /// Kata terlarang di chat (`BANNED_WORDS`, dipisah koma), huruf kecil.
     /// Sengaja dari konfigurasi, bukan dari repo publik.
     pub banned_words: Vec<String>,
+    /// Token admin (`ADMIN_TOKEN`, secret). Kosong atau pendek = endpoint admin
+    /// tertutup untuk semua orang (lihat `admin.rs`).
+    pub admin_token: Secret,
 }
 
 /// Daftar kata terlarang dipisah koma atau baris baru. Kosong dan terlalu
@@ -103,7 +106,15 @@ impl Config {
             }),
             rate_salt: Secret::default(),
             banned_words: Vec::new(),
+            admin_token: Secret::default(),
         }
+    }
+
+    /// Token admin (opsional).
+    #[must_use]
+    pub fn with_admin(mut self, token: Option<&str>) -> Self {
+        self.admin_token = Secret::new(token.map(str::trim).unwrap_or_default());
+        self
     }
 
     /// Pengaturan Live Chat (opsional).
@@ -128,8 +139,11 @@ impl Config {
         let token = env.secret("TURSO_AUTH_TOKEN").map(|v| v.to_string()).ok();
         let salt = text("RATE_LIMIT_SALT");
         let banned = text("BANNED_WORDS");
+        // Hanya secret: token admin tidak boleh jatuh ke `[vars]` yang ada di repo.
+        let admin = env.secret("ADMIN_TOKEN").map(|v| v.to_string()).ok();
         Self::from_values(origins.as_deref(), url.as_deref(), token.as_deref())
             .with_chat(salt.as_deref(), banned.as_deref())
+            .with_admin(admin.as_deref())
     }
 }
 
@@ -186,6 +200,15 @@ mod tests {
         assert_eq!(c.rate_salt.expose(), "s3cret");
         assert_eq!(c.banned_words, ["a", "b"]);
         assert!(!format!("{c:?}").contains("s3cret"));
+    }
+
+    #[test]
+    fn the_admin_token_defaults_to_empty_and_stays_out_of_debug_output() {
+        let c = Config::from_values(None, None, None);
+        assert_eq!(c.admin_token.expose(), "");
+        let c = c.with_admin(Some("  tok-tok-tok  "));
+        assert_eq!(c.admin_token.expose(), "tok-tok-tok");
+        assert!(!format!("{c:?}").contains("tok-tok-tok"));
     }
 
     #[test]

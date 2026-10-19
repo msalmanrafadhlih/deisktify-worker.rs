@@ -52,7 +52,7 @@ test("all migrations apply to an empty database", () => {
     .map((r) => r.name);
   assert.deepEqual(tables, [
     "bookmarks", "chat_messages", "chat_rate_limits", "embience_preset_items", "embience_presets",
-    "embiences", "generations", "journal_snapshots", "radio_stations",
+    "embiences", "generations", "journal_snapshots", "message_reports", "radio_stations",
   ]);
 });
 
@@ -196,8 +196,8 @@ test("chat queries: insert returns the stored row; created_at must be a UTC time
   const db = freshDb();
   const row = insertMsg(db, "moch", "hello", "2026-10-17T05:30:00Z", "https://a.dev");
   assert.deepEqual({ ...row }, {
-    id: 1, username: "moch", url: "https://a.dev", avatar_url: null,
-    message: "hello", attachment_url: null, created_at: "2026-10-17T05:30:00Z",
+    id: 1, username: "moch", url: "https://a.dev",
+    message: "hello", created_at: "2026-10-17T05:30:00Z",
   });
   assert.equal(insertMsg(db, "x", "y").id, 2);
   assert.throws(() => insertMsg(db, "x", "y", "17-10-2026"), /CHECK/);
@@ -214,6 +214,91 @@ test("chat queries: recent returns the last N oldest-first; after returns only n
   assert.deepEqual(db.prepare(sqlOf("messages_after")).all(4, 2).map((r) => r.id), [5, 6]);
   assert.deepEqual(db.prepare(sqlOf("messages_after")).all(7, 100), []);
   assert.deepEqual(db.prepare(sqlOf("messages_recent")).all(100).length, 7);
+});
+
+test("chat queries: before returns the page just older than the cursor, oldest-first", () => {
+  const db = freshDb();
+  for (let i = 1; i <= 9; i++) insertMsg(db, "u", `m${i}`);
+  const before = (id, n) => db.prepare(sqlOf("messages_before")).all(id, n).map((r) => r.id);
+  assert.deepEqual(before(10, 3), [7, 8, 9]);
+  assert.deepEqual(before(7, 3), [4, 5, 6]);
+  assert.deepEqual(before(4, 3), [1, 2, 3]);
+  assert.deepEqual(before(1, 3), [], "nothing older than the first entry");
+  assert.deepEqual(before(3, 10), [1, 2]);
+});
+
+test("moderation: hidden entries disappear from every public read but stay in the table", () => {
+  const db = freshDb();
+  for (let i = 1; i <= 6; i++) insertMsg(db, "u", `m${i}`);
+  const hide = (id, at = "2026-10-18T00:00:00Z") => db.prepare(sqlOf("message_delete")).get(id, at);
+  assert.deepEqual({ ...hide(3) }, { id: 3 });
+  assert.equal(hide(3), undefined, "hiding twice finds nothing to hide");
+  assert.equal(hide(99), undefined, "unknown id");
+  assert.deepEqual(db.prepare(sqlOf("messages_recent")).all(10).map((r) => r.id), [1, 2, 4, 5, 6]);
+  assert.deepEqual(db.prepare(sqlOf("messages_after")).all(1, 10).map((r) => r.id), [2, 4, 5, 6]);
+  assert.deepEqual(db.prepare(sqlOf("messages_before")).all(6, 10).map((r) => r.id), [1, 2, 4, 5]);
+  // "recent" fills its page from the visible entries, not the raw id range.
+  assert.deepEqual(db.prepare(sqlOf("messages_recent")).all(3).map((r) => r.id), [4, 5, 6]);
+  assert.equal(count(db, "chat_messages"), 6);
+  assert.throws(() => hide(1, "yesterday"), /CHECK/);
+});
+
+test("moderation: one report per reporter per entry; hidden or unknown entries take none", () => {
+  const db = freshDb();
+  for (let i = 1; i <= 3; i++) insertMsg(db, "u", `m${i}`);
+  const report = (id, who, at) => db.prepare(sqlOf("report_insert")).get(id, who, at);
+  assert.deepEqual({ ...report(2, "a", "2026-10-18T01:00:00Z") }, { message_id: 2 });
+  assert.equal(report(2, "a", "2026-10-18T02:00:00Z"), undefined, "same reporter twice");
+  assert.ok(report(2, "b", "2026-10-18T03:00:00Z"));
+  assert.ok(report(3, "a", "2026-10-18T04:00:00Z"));
+  assert.equal(report(99, "a", "2026-10-18T05:00:00Z"), undefined, "no such entry");
+  db.prepare(sqlOf("message_delete")).get(1, "2026-10-18T00:00:00Z");
+  assert.equal(report(1, "c", "2026-10-18T06:00:00Z"), undefined, "hidden entry");
+  assert.equal(count(db, "message_reports"), 3);
+  // INSERT OR IGNORE juga melewati baris yang melanggar CHECK: tidak error, tidak tersimpan.
+  assert.equal(report(2, "", "2026-10-18T07:00:00Z"), undefined);
+  assert.equal(report(2, "x", "later"), undefined);
+  assert.equal(count(db, "message_reports"), 3);
+
+  const list = db.prepare(sqlOf("reports_list")).all(50).map((r) => ({ ...r }));
+  assert.deepEqual(list.map((r) => [r.id, r.reports]), [[2, 2], [3, 1]]);
+  assert.deepEqual(Object.keys(list[0]).sort(), [
+    "created_at", "id", "last_reported_at", "message", "reports", "url", "username",
+  ]);
+  assert.equal(list[0].last_reported_at, "2026-10-18T03:00:00Z");
+  assert.equal(db.prepare(sqlOf("reports_list")).all(1).length, 1);
+  // Entri yang disembunyikan keluar dari antrean laporan.
+  db.prepare(sqlOf("message_delete")).get(2, "2026-10-18T08:00:00Z");
+  assert.deepEqual(db.prepare(sqlOf("reports_list")).all(50).map((r) => r.id), [3]);
+});
+
+test("moderation: the report counter only counts that reporter inside the window", () => {
+  const db = freshDb();
+  for (let i = 1; i <= 4; i++) insertMsg(db, "u", `m${i}`);
+  const report = (id, who, at) => db.prepare(sqlOf("report_insert")).get(id, who, at);
+  report(1, "a", "2026-10-18T00:30:00Z");
+  report(2, "a", "2026-10-18T01:10:00Z");
+  report(3, "a", "2026-10-18T01:20:00Z");
+  report(1, "b", "2026-10-18T01:30:00Z");
+  const n = (who, since) => db.prepare(sqlOf("report_count")).get(who, since).n;
+  assert.equal(n("a", "2026-10-18T01:00:00Z"), 2);
+  assert.equal(n("a", "2026-10-18T00:00:00Z"), 3);
+  assert.equal(n("a", "2026-10-18T02:00:00Z"), 0);
+  assert.equal(n("b", "2026-10-18T00:00:00Z"), 1);
+  assert.equal(n("nobody", "2026-10-18T00:00:00Z"), 0);
+});
+
+test("migration 0008 applies on top of a database that already holds entries", () => {
+  const db = new DatabaseSync(":memory:");
+  const all = sqlFiles("migrations");
+  for (const m of all.filter((m) => m.name < "0008")) db.exec(m.sql);
+  db.exec("INSERT INTO chat_messages (username, message, created_at) VALUES ('u', 'old', '2026-01-01T00:00:00Z')");
+  // Worker lama (tanpa deleted_at) tetap jalan setelah migrasi ini.
+  db.exec(all.find((m) => m.name.startsWith("0008")).sql);
+  assert.equal(db.prepare("SELECT message FROM chat_messages WHERE id = 1").get().message, "old");
+  assert.equal(db.prepare("SELECT deleted_at FROM chat_messages WHERE id = 1").get().deleted_at, null);
+  db.exec("INSERT INTO chat_messages (username, message, created_at) VALUES ('u', 'from the old worker', '2026-01-02T00:00:00Z')");
+  assert.equal(count(db, "chat_messages"), 2);
 });
 
 test("rate limit queries: hits count up per key and window; cleanup only removes old windows", () => {
@@ -238,7 +323,7 @@ test("rate limit queries: hits count up per key and window; cleanup only removes
 });
 
 test("API queries are bounded", () => {
-  for (const name of ["generations", "bookmarks", "radio", "embiences", "presets", "messages_after"]) {
+  for (const name of ["generations", "bookmarks", "radio", "embiences", "presets", "messages_after", "reports_list"]) {
     const sql = readFileSync(join(root, "crates/api/src/queries", `${name}.sql`), "utf8");
     assert.match(sql, /\bLIMIT\s+(\d+|\?\d+)\s*$/im, name);
     assert.match(sql, /\bORDER BY\b/i, name);

@@ -8,7 +8,7 @@ use std::sync::Arc;
 use api_types::{ChatMessage, Items, NewMessage};
 use axum::{
     body::Bytes,
-    extract::{rejection::BytesRejection, RawQuery, State},
+    extract::{rejection::BytesRejection, Path, RawQuery, State},
     http::{header, HeaderMap, HeaderName, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     Json,
@@ -16,6 +16,7 @@ use axum::{
 use serde::Serialize;
 
 use crate::{
+    admin,
     chat::{self, ChatError},
     config::Config,
     content::{self, ContentError, Loaded},
@@ -126,7 +127,7 @@ pub async fn presets(State(config): State<Arc<Config>>) -> Result<Response, AppE
     .await
 }
 
-// ------------------------------------------------------------- Live Chat (D4a)
+// ------------------------------------------------------------ Guestbook (D4)
 
 /// Pesan error umum; detail hanya ke log Worker.
 pub fn chat_error(e: &ChatError) -> Response {
@@ -159,8 +160,8 @@ fn db_client(
     })
 }
 
-/// `GET /api/v1/messages?after=<id>&limit=<n>`. Dipanggil berulang (polling),
-/// jadi tidak pernah di-cache.
+/// `GET /api/v1/messages?after=<id>|before=<id>&limit=<n>`. Tidak pernah di-cache:
+/// entri yang baru dihapus admin harus segera hilang dari pemuatan berikutnya.
 #[worker::send]
 pub async fn messages_get(
     State(config): State<Arc<Config>>,
@@ -247,12 +248,11 @@ pub async fn messages_post(
         .map_err(|reject| AppError::bad_request(reject.message()))?;
 
     let client = db_client(&config, "messages")?;
-    let now_secs = i64::try_from(worker::Date::now().as_millis() / 1000).unwrap_or(0);
     let ip = client_ip(&headers);
     let sender = chat::Sender {
         ip: &ip,
         salt: config.rate_salt.expose(),
-        now_secs,
+        now_secs: now_secs(),
     };
     match chat::submit(&client, &sender, &clean).await {
         Ok(message) => Ok(created(message)),
@@ -267,6 +267,111 @@ pub async fn messages_post(
 
 fn created(message: ChatMessage) -> Response {
     (StatusCode::CREATED, Json(message)).into_response()
+}
+
+/// Id di path -> `u32` >= 1. Diambil sebagai teks lalu diperiksa sendiri supaya
+/// yang salah tetap berupa error JSON kita (bukan penolakan teks polos Axum).
+fn parse_id(raw: &str) -> Result<u32, AppError> {
+    let digits = !raw.is_empty() && raw.bytes().all(|b| b.is_ascii_digit());
+    raw.parse::<u32>()
+        .ok()
+        .filter(|n| digits && *n >= 1)
+        .ok_or(AppError::bad_request("Invalid entry id."))
+}
+
+fn now_secs() -> i64 {
+    i64::try_from(worker::Date::now().as_millis() / 1000).unwrap_or(0)
+}
+
+/// `POST /api/v1/messages/{id}/report`. Aturan yang sama dengan menulis entri:
+/// origin yang diizinkan dan `application/json` (memaksa preflight CORS, jadi
+/// situs lain tidak bisa menyuruh browser pengunjung melapor diam-diam).
+/// Jawabannya selalu `204` kalau permintaannya sah, apa pun yang terjadi pada
+/// entrinya; lihat `chat::report`.
+#[worker::send]
+pub async fn message_report(
+    State(config): State<Arc<Config>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    if !origin_ok(&config.allowed_origins, &headers) {
+        return Err(AppError::FORBIDDEN);
+    }
+    if !is_json(
+        headers
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok()),
+    ) {
+        return Err(AppError::bad_request(
+            "Content-Type must be application/json.",
+        ));
+    }
+    let id = parse_id(&id)?;
+    let client = db_client(&config, "report")?;
+    let ip = client_ip(&headers);
+    let sender = chat::Sender {
+        ip: &ip,
+        salt: config.rate_salt.expose(),
+        now_secs: now_secs(),
+    };
+    match chat::report(&client, &sender, id).await {
+        Ok(()) => Ok(StatusCode::NO_CONTENT.into_response()),
+        Err(e) => {
+            if !matches!(e, ChatError::RateLimited { .. }) {
+                worker::console_error!("report: {e}");
+            }
+            Ok(chat_error(&e))
+        }
+    }
+}
+
+/// Header `Authorization` mentah, kalau ada dan berupa teks.
+fn authorization(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+}
+
+/// `GET /api/v1/admin/reports`: entri yang dilaporkan, paling banyak dulu.
+#[worker::send]
+pub async fn admin_reports(
+    State(config): State<Arc<Config>>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    if !admin::authorized(&config.admin_token, authorization(&headers)) {
+        return Err(AppError::UNAUTHORIZED);
+    }
+    let client = db_client(&config, "admin reports")?;
+    match chat::reported(&client).await {
+        Ok(items) => Ok(Json(Items { items }).into_response()),
+        Err(e) => {
+            worker::console_error!("admin reports: {e}");
+            Ok(chat_error(&e))
+        }
+    }
+}
+
+/// `DELETE /api/v1/admin/messages/{id}`: menyembunyikan entri (baris tetap ada).
+/// `204` jika disembunyikan, `404` jika tidak ada atau sudah tersembunyi.
+#[worker::send]
+pub async fn admin_delete(
+    State(config): State<Arc<Config>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    if !admin::authorized(&config.admin_token, authorization(&headers)) {
+        return Err(AppError::UNAUTHORIZED);
+    }
+    let id = parse_id(&id)?;
+    let client = db_client(&config, "admin delete")?;
+    match chat::hide(&client, id, now_secs()).await {
+        Ok(true) => Ok(StatusCode::NO_CONTENT.into_response()),
+        Ok(false) => Err(AppError::NOT_FOUND),
+        Err(e) => {
+            worker::console_error!("admin delete: {e}");
+            Ok(chat_error(&e))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -306,6 +411,26 @@ mod tests {
         }));
         assert!(!e.message.contains("radio_stations"));
         assert_eq!(e.message, "Something went wrong.");
+    }
+
+    #[test]
+    fn entry_ids_in_paths_must_be_plain_positive_numbers() {
+        assert_eq!(parse_id("42"), Ok(42));
+        assert_eq!(parse_id("1"), Ok(1));
+        for bad in [
+            "0",
+            "",
+            "-1",
+            "+1",
+            "1.5",
+            "x",
+            "4294967296",
+            " 7",
+            "7 ",
+            "0x10",
+        ] {
+            assert!(parse_id(bad).is_err(), "{bad:?}");
+        }
     }
 
     #[test]

@@ -18,4 +18,6 @@ ALLOWED_ORIGINS = "https://tquilla.is-a.dev"
 # Rahasia JANGAN ditulis di sini. Set lewat:
 #   npx wrangler secret put TURSO_AUTH_TOKEN
 #   npx wrangler secret put TURSO_DATABASE_URL     (atau isi sebagai [vars] di sini)
+#   npx wrangler secret put RATE_LIMIT_SALT        (openssl rand -hex 32)
+#   npx wrangler secret put ADMIN_TOKEN            (openssl rand -hex 32; kosong = admin mati)
 # Untuk `wrangler dev`, isi crates/api/.dev.vars (lihat .dev.vars.example).

@@ -12,6 +12,7 @@ pemisah), mis. `0001_generations.sql`. Tabel pertama datang di tahap D2.
 | `chat_messages` | `0005_chat_messages.sql` |
 | `journal_snapshots` | `0006_journal_snapshots.sql` |
 | `chat_rate_limits` (pembatas kecepatan chat) | `0007_chat_rate_limits.sql` |
+| `chat_messages.deleted_at`, `message_reports` (moderasi Guestbook) | `0008_chat_moderation.sql` |
 
 ## Aturan
 

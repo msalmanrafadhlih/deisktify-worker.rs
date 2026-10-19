@@ -31,8 +31,18 @@ pub mod paths {
     /// `GET`: preset Embience beserta isinya.
     pub const PRESETS: &str = "/api/v1/presets";
 
-    /// `GET`: pesan Live Chat (`?after=<id>&limit=<n>`). `POST`: kirim pesan.
+    /// `GET`: entri Guestbook (`?after=<id>` atau `?before=<id>`, `&limit=<n>`).
+    /// `POST`: tulis entri (teks Markdown).
     pub const MESSAGES: &str = "/api/v1/messages";
+    /// `POST`: laporkan sebuah entri (D4b). Templat rute Axum; klien memakai
+    /// [`message_report`].
+    pub const MESSAGE_REPORT: &str = "/api/v1/messages/{id}/report";
+    /// `GET`: entri yang dilaporkan, paling banyak dilaporkan dulu. Hanya admin
+    /// (`Authorization: Bearer`), tidak untuk browser.
+    pub const ADMIN_REPORTS: &str = "/api/v1/admin/reports";
+    /// `DELETE`: hapus (sembunyikan) sebuah entri. Hanya admin. Templat rute
+    /// Axum; pemanggil memakai [`admin_message`].
+    pub const ADMIN_MESSAGE: &str = "/api/v1/admin/messages/{id}";
 
     /// Semua path; tambahkan endpoint baru di sini juga supaya test prefix mencakupnya.
     pub const ALL: &[&str] = &[
@@ -43,7 +53,20 @@ pub mod paths {
         EMBIENCES,
         PRESETS,
         MESSAGES,
+        MESSAGE_REPORT,
+        ADMIN_REPORTS,
+        ADMIN_MESSAGE,
     ];
+
+    /// Path `POST` untuk melaporkan entri `id`.
+    pub fn message_report(id: u32) -> String {
+        format!("/api/v1/messages/{id}/report")
+    }
+
+    /// Path `DELETE` admin untuk entri `id`.
+    pub fn admin_message(id: u32) -> String {
+        format!("/api/v1/admin/messages/{id}")
+    }
 }
 
 /// Batas yang diberlakukan server. Klien memakainya untuk `maxlength` dan
@@ -51,17 +74,21 @@ pub mod paths {
 pub mod limits {
     /// Ukuran maksimum body request JSON, dalam byte.
     pub const MAX_BODY_BYTES: usize = 16 * 1024;
-    /// Panjang nama pengguna Live Chat, dalam karakter (setelah dirapikan).
+    /// Panjang nama pengguna Guestbook, dalam karakter (setelah dirapikan).
     pub const MAX_USERNAME_CHARS: usize = 32;
-    /// Panjang pesan Live Chat, dalam karakter (setelah dirapikan).
-    pub const MAX_MESSAGE_CHARS: usize = 1000;
-    /// Jumlah baris maksimum dalam satu pesan.
-    pub const MAX_MESSAGE_LINES: usize = 20;
+    /// Panjang entri Guestbook (teks Markdown), dalam karakter (setelah
+    /// dirapikan). Kolom database membolehkan sampai 4000; 2000 cukup untuk
+    /// sebuah "README mini" dan tetap muat di batas body 16 KiB.
+    pub const MAX_MESSAGE_CHARS: usize = 2000;
+    /// Jumlah baris maksimum dalam satu entri.
+    pub const MAX_MESSAGE_LINES: usize = 40;
     /// Panjang tautan pengirim, dalam karakter.
     pub const MAX_LINK_CHARS: usize = 300;
-    /// Jumlah pesan default dan maksimum per `GET /messages`.
+    /// Jumlah entri default dan maksimum per `GET /messages`.
     pub const MESSAGES_DEFAULT_LIMIT: u32 = 50;
     pub const MESSAGES_MAX_LIMIT: u32 = 100;
+    /// Jumlah entri terlapor yang dikembalikan `GET /admin/reports`.
+    pub const REPORTS_LIMIT: u32 = 50;
 }
 
 /// Status keseluruhan layanan.
@@ -275,18 +302,35 @@ pub struct Preset {
     pub embience_ids: Vec<u32>,
 }
 
-/// Satu pesan Live Chat. `url`, `avatar_url`, dan `attachment_url` (kalau ada)
-/// selalu `http(s)://` (avatar dan lampiran `https://`); klien tetap memeriksanya.
+/// Satu entri Guestbook. `message` adalah teks Markdown mentah (server tidak
+/// pernah mengubahnya menjadi HTML; klien yang merender dan harus
+/// mengabaikan HTML mentah di dalamnya). `url` (kalau ada) selalu `http(s)://`;
+/// klien tetap memeriksanya. Avatar dan lampiran sengaja tidak ada: avatar
+/// dibuat klien dari `username`, dan unggahan tidak didukung.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub id: u32,
     pub username: String,
     pub url: Option<String>,
-    pub avatar_url: Option<String>,
     pub message: String,
-    pub attachment_url: Option<String>,
     /// UTC, `YYYY-MM-DDTHH:MM:SSZ`.
     pub created_at: String,
+}
+
+/// Satu entri yang dilaporkan, untuk admin (`GET /api/v1/admin/reports`).
+/// Hanya dipakai alat admin; browser publik tidak pernah menerimanya.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReportedMessage {
+    pub id: u32,
+    pub username: String,
+    pub url: Option<String>,
+    pub message: String,
+    /// UTC, `YYYY-MM-DDTHH:MM:SSZ`.
+    pub created_at: String,
+    /// Jumlah pelapor berbeda.
+    pub reports: u32,
+    /// UTC, laporan terbaru.
+    pub last_reported_at: String,
 }
 
 /// Body `POST /api/v1/messages`. Server merapikan dan memvalidasi ulang semuanya
@@ -299,7 +343,7 @@ pub struct NewMessage {
     pub message: String,
 }
 
-/// Perapian dan pemeriksaan teks Live Chat. Dipakai server (yang berwenang) dan
+/// Perapian dan pemeriksaan teks Guestbook. Dipakai server (yang berwenang) dan
 /// klien (hanya untuk pratinjau/tombol kirim), supaya aturannya tidak berbeda.
 pub mod chat {
     use super::{limits, validate};
@@ -322,7 +366,7 @@ pub mod chat {
                 Reject::UsernameLength => "Username must be 1 to 32 characters.",
                 Reject::UsernameChars => "Username has characters that are not allowed.",
                 Reject::MessageLength => {
-                    "Message must be 1 to 1000 characters and at most 20 lines."
+                    "Message must be 1 to 2000 characters and at most 40 lines."
                 }
                 Reject::MessageChars => "Message has characters that are not allowed.",
                 Reject::Link => "The link must be a valid web address.",
@@ -359,16 +403,27 @@ pub mod chat {
         Ok(s)
     }
 
-    /// `\r\n` menjadi `\n`, tab menjadi spasi, lebih dari satu baris kosong
-    /// berturut-turut diringkas; 1..=1000 karakter dan paling banyak 20 baris.
+    /// Karakter yang ditolak di isi entri. Sama dengan [`hidden`] kecuali
+    /// U+200D (zero-width joiner): emoji majemuk (keluarga, profesi, bendera
+    /// bergender) tersusun darinya. Pencocokan kata terlarang membuang semua
+    /// non-alfanumerik, jadi ZWJ tidak bisa dipakai menyelinap lewat filter.
+    fn hidden_in_message(c: char) -> bool {
+        c != '\u{200D}' && hidden(c)
+    }
+
+    /// Dirapikan untuk disimpan sebagai Markdown: `\r\n` menjadi `\n`, tab
+    /// menjadi empat spasi (Markdown menghitung tab sebagai kelipatan empat,
+    /// dan tab mentah merusak blok kode dan daftar bersarang), spasi di
+    /// ujung baris dibuang, lebih dari satu baris kosong berturut-turut
+    /// diringkas; 1..=2000 karakter dan paling banyak 40 baris.
     pub fn clean_message(raw: &str) -> Result<String, Reject> {
         let unified = raw.replace("\r\n", "\n").replace('\r', "\n");
         let mut out = String::with_capacity(unified.len());
         for c in unified.chars() {
             match c {
                 '\n' => out.push('\n'),
-                '\t' => out.push(' '),
-                c if hidden(c) => return Err(Reject::MessageChars),
+                '\t' => out.push_str("    "),
+                c if hidden_in_message(c) => return Err(Reject::MessageChars),
                 c => out.push(c),
             }
         }
@@ -421,22 +476,44 @@ pub mod chat {
         fn messages_are_normalised_and_bounded() {
             assert_eq!(clean_message("  hi  ").as_deref(), Ok("hi"));
             assert_eq!(clean_message("a\r\nb\rc").as_deref(), Ok("a\nb\nc"));
-            assert_eq!(clean_message("a\tb").as_deref(), Ok("a b"));
+            assert_eq!(clean_message("a\tb").as_deref(), Ok("a    b"));
+            assert_eq!(
+                clean_message("- a\n\t- b  \n").as_deref(),
+                Ok("- a\n    - b"),
+                "nested list keeps its indent; trailing spaces go"
+            );
             assert_eq!(clean_message("a\n\n\n\n\nb").as_deref(), Ok("a\n\nb"));
             assert_eq!(clean_message(" \n "), Err(Reject::MessageLength));
-            assert_eq!(clean_message(&"a".repeat(1001)), Err(Reject::MessageLength));
-            assert!(clean_message(&"a".repeat(1000)).is_ok());
+            assert_eq!(clean_message(&"a".repeat(2001)), Err(Reject::MessageLength));
+            assert!(clean_message(&"a".repeat(2000)).is_ok());
             assert!(
-                clean_message(&"é".repeat(1000)).is_ok(),
+                clean_message(&"é".repeat(2000)).is_ok(),
                 "counted in chars, not bytes"
             );
-            let many = (0..21).map(|_| "x").collect::<Vec<_>>().join("\n");
+            let many = (0..41).map(|_| "x").collect::<Vec<_>>().join("\n");
             assert_eq!(clean_message(&many), Err(Reject::MessageLength));
-            let twenty = (0..20).map(|_| "x").collect::<Vec<_>>().join("\n");
-            assert!(clean_message(&twenty).is_ok());
-            for bad in ["a\u{0}b", "a\u{1b}[31m", "x\u{202E}y"] {
+            let forty = (0..40).map(|_| "x").collect::<Vec<_>>().join("\n");
+            assert!(clean_message(&forty).is_ok());
+            for bad in ["a\u{0}b", "a\u{1b}[31m", "x\u{202E}y", "a\u{200B}b"] {
                 assert_eq!(clean_message(bad), Err(Reject::MessageChars), "{bad:?}");
             }
+        }
+
+        #[test]
+        fn compound_emoji_survive_but_usernames_still_reject_zero_width_joiners() {
+            let family = "hi \u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}";
+            assert_eq!(clean_message(family).as_deref(), Ok(family));
+            assert_eq!(
+                clean_username("a\u{200D}b"),
+                Err(Reject::UsernameChars),
+                "a joiner has no business in a name"
+            );
+        }
+
+        #[test]
+        fn markdown_syntax_is_stored_verbatim() {
+            let md = "# Hi\n\n**bold** _it_ ~~x~~ `c`\n\n- [x] done\n\n```rs\nfn main() {}\n```\n\n| a | b |\n|---|---|\n| 1 | 2 |";
+            assert_eq!(clean_message(md).as_deref(), Ok(md));
         }
 
         #[test]
@@ -464,6 +541,8 @@ pub enum ErrorCode {
     MethodNotAllowed,
     /// Request ditolak karena asalnya (mis. `Origin` yang tidak diizinkan).
     Forbidden,
+    /// Endpoint admin: token tidak ada atau salah.
+    Unauthorized,
     PayloadTooLarge,
     RateLimited,
     Unavailable,
@@ -532,6 +611,93 @@ mod tests {
         for p in paths::ALL {
             assert!(p.starts_with(API_PREFIX), "{p}");
         }
+    }
+
+    #[test]
+    fn path_helpers_fill_in_the_route_templates() {
+        assert_eq!(paths::message_report(42), "/api/v1/messages/42/report");
+        assert_eq!(
+            paths::message_report(42),
+            paths::MESSAGE_REPORT.replace("{id}", "42")
+        );
+        assert_eq!(paths::admin_message(7), "/api/v1/admin/messages/7");
+        assert_eq!(
+            paths::admin_message(7),
+            paths::ADMIN_MESSAGE.replace("{id}", "7")
+        );
+    }
+
+    #[test]
+    fn unauthorized_error_code_is_snake_case_on_the_wire() {
+        let body = ApiErrorBody::new(ErrorCode::Unauthorized, "No.");
+        assert_eq!(
+            serde_json::to_value(&body).unwrap(),
+            serde_json::json!({"error": {"code": "unauthorized", "message": "No."}})
+        );
+    }
+
+    #[test]
+    fn reported_message_json_shape_is_stable() {
+        let r = ReportedMessage {
+            id: 3,
+            username: "u".into(),
+            url: None,
+            message: "m".into(),
+            created_at: "2026-10-18T00:00:00Z".into(),
+            reports: 2,
+            last_reported_at: "2026-10-18T01:00:00Z".into(),
+        };
+        assert_eq!(
+            serde_json::to_value(&r).unwrap(),
+            serde_json::json!({
+                "id": 3, "username": "u", "url": null, "message": "m",
+                "created_at": "2026-10-18T00:00:00Z", "reports": 2,
+                "last_reported_at": "2026-10-18T01:00:00Z"
+            })
+        );
+    }
+
+    #[test]
+    fn guestbook_entry_json_shape_is_stable_and_has_no_image_fields() {
+        let m = ChatMessage {
+            id: 4,
+            username: "moch".into(),
+            url: Some("https://a.dev".into()),
+            message: "# hi".into(),
+            created_at: "2026-10-18T00:00:00Z".into(),
+        };
+        assert_eq!(
+            serde_json::to_value(&m).unwrap(),
+            serde_json::json!({
+                "id": 4, "username": "moch", "url": "https://a.dev",
+                "message": "# hi", "created_at": "2026-10-18T00:00:00Z"
+            })
+        );
+    }
+
+    #[test]
+    fn clients_and_servers_from_the_chat_era_still_understand_each_other() {
+        // Server lama (v0.3) masih mengirim kolom gambar; klien baru mengabaikannya.
+        let old_server = r#"{"id":1,"username":"a","url":null,"avatar_url":"https://x/a.png",
+            "message":"m","attachment_url":null,"created_at":"2026-01-01T00:00:00Z"}"#;
+        let m: ChatMessage = serde_json::from_str(old_server).unwrap();
+        assert_eq!(m.id, 1);
+
+        // Klien lama (v0.3) membaca bentuk baru: kolom gambar adalah `Option`,
+        // jadi yang hilang jatuh ke `None` dan tidak membuat decode gagal.
+        #[derive(Deserialize)]
+        struct V03 {
+            id: u32,
+            avatar_url: Option<String>,
+            attachment_url: Option<String>,
+        }
+        let new_shape = serde_json::to_string(&m).unwrap();
+        let old_client: V03 = serde_json::from_str(&new_shape).unwrap();
+        assert_eq!(old_client.id, 1);
+        assert_eq!(
+            (old_client.avatar_url, old_client.attachment_url),
+            (None, None)
+        );
     }
 
     #[test]

@@ -31,6 +31,11 @@ impl AppError {
         code: ErrorCode::Forbidden,
         message: "Request not allowed from this origin.",
     };
+    pub const UNAUTHORIZED: Self = Self {
+        status: StatusCode::UNAUTHORIZED,
+        code: ErrorCode::Unauthorized,
+        message: "Unauthorized.",
+    };
     pub const PAYLOAD_TOO_LARGE: Self = Self {
         status: StatusCode::PAYLOAD_TOO_LARGE,
         code: ErrorCode::PayloadTooLarge,
@@ -39,7 +44,7 @@ impl AppError {
     pub const RATE_LIMITED: Self = Self {
         status: StatusCode::TOO_MANY_REQUESTS,
         code: ErrorCode::RateLimited,
-        message: "Too many messages, try again in a moment.",
+        message: "Too many requests, try again in a moment.",
     };
     pub const UNAVAILABLE: Self = Self {
         status: StatusCode::SERVICE_UNAVAILABLE,
