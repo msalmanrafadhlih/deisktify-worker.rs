@@ -2,7 +2,7 @@
 
 API untuk situs [tquilla.is-a.dev](https://tquilla.is-a.dev): **Axum (Rust) di Cloudflare Workers** (`workers-rs`) dengan database **Turso (libSQL)**. Frontend-nya ada di repo terpisah (Dioxus, GitHub Pages) dan hanya memakai REST + JSON.
 
-Rencana dan keputusan lengkap (D0–D8) ada di README repo frontend, bagian "Fullstack dan database". Repo ini sampai **D4 (Guestbook)**: `GET /api/v1/health`, lima endpoint konten read-only, serta `GET/POST /api/v1/messages` (buku tamu; isinya Markdown yang dirender klien) dengan validasi, pembatas kecepatan, filter kata terlarang, laporan pembaca, dan moderasi admin; ditambah skema database, seed, dan runner migrasi. **Tidak ada unggah gambar**: R2 meminta kartu pembayaran, jadi avatar dibuat klien dari username dan lampiran dihapus dari kontrak (v0.4.0).
+Rencana dan keputusan lengkap (D0–D8) ada di README repo frontend, bagian "Fullstack dan database". Repo ini sampai **D4 (Guestbook)**: `GET /api/v1/health`, lima endpoint konten read-only, serta `GET/POST /api/v1/messages` (buku tamu; isinya Markdown yang dirender klien) dengan validasi, pembatas kecepatan, filter kata terlarang, laporan pembaca, dan moderasi admin; ditambah skema database, seed, dan runner migrasi. **Tidak ada unggah gambar**: R2 meminta kartu pembayaran, jadi avatar dibuat klien dari username dan lampiran dihapus dari kontrak (v0.4.0). Sejak **D5** ada GitHub Journal (cron), dan sejak **D6a** ada dashboard admin di `/admin/` (lihat bagian "Dashboard admin").
 
 ## Isi repo
 
@@ -10,7 +10,8 @@ Rencana dan keputusan lengkap (D0–D8) ada di README repo frontend, bagian "Ful
 | --- | --- |
 | `crates/api-types` | Kontrak API: struct serde, path, konstanta batas. **Dipakai bersama frontend** (hanya `serde`, ikut dikompilasi ke wasm32) |
 | `crates/turso-http` | Klien API HTTP Turso (`/v2/pipeline`): `execute` dan `transaction`, plus runner migrasi (`migrate`). Tanpa runtime tertentu; transport bisa diganti |
-| `crates/api` | Worker: router Axum, CORS, error JSON, `health`, endpoint konten (`content.rs`), Guestbook (`chat.rs`), otorisasi admin (`admin.rs`), `routes.rs`, `queries/*.sql`. Berisi `wrangler.toml` |
+| `crates/api` | Worker: router Axum, CORS, error JSON, `health`, endpoint konten (`content.rs`), Guestbook (`chat.rs`), otorisasi admin (`admin.rs`), dashboard admin (`panel.rs`: pembatas percobaan gagal, riwayat, ringkasan), `routes.rs`, `queries/*.sql`. Berisi `wrangler.toml` |
+| `web/` | **Dashboard admin** (D6a): JavaScript biasa tanpa build step (Preact + htm yang disalin ke repo), dilayani Worker yang sama di `/admin/`. `_headers` berisi CSP. Lihat bagian "Dashboard admin" |
 | `crates/migrate` | CLI native `migrate status/up/seed` di atas `turso-http` (bukan bagian dari Worker) |
 | `migrations/` | Migrasi `.sql` berurutan (skema); lihat `migrations/README.md` |
 | `seeds/` | SQL seed hasil `scripts/gen_seed.mjs` (konten situs, dan contoh untuk dev) |
@@ -36,6 +37,9 @@ Rencana dan keputusan lengkap (D0–D8) ada di README repo frontend, bagian "Ful
 | DELETE | `/api/v1/admin/messages/{id}` | Admin saja: menyembunyikan entri (soft delete, kolom `deleted_at`) → `204`; `404` bila tidak ada atau sudah tersembunyi; `401` tanpa/salah token |
 | GET | `/api/v1/journal` | Snapshot terbaru jurnal GitHub (halaman `/profile`): `{"fetched_at":"…Z","source":"github"\|"seed","data":{hero,pinned,chronicle}}`. **Data, bukan tampilan**: tidak ada HTML dan tidak ada kalimat (lihat `api_types::journal`). Payload diperiksa lagi sebelum dikirim. `503` bila belum pernah ada snapshot. `Cache-Control: public, max-age=300, stale-while-revalidate=600` |
 | POST | `/api/v1/admin/journal/refresh` | Admin saja: ambil dari GitHub sekarang tanpa menunggu cron → `200 {"fetched_at":"…Z"}`. Paling cepat sekali per menit (`429` + `Retry-After`); `503` bila `GITHUB_TOKEN` belum diisi; `502` bila GitHub gagal; `401` tanpa/salah token |
+| POST | `/api/v1/admin/login` | Admin saja: memeriksa token, mencatat "login" di riwayat, menjawab ringkasan (sama dengan `overview`). `401` token salah, `429` + `Retry-After` setelah 10 percobaan gagal dalam 15 menit |
+| GET | `/api/v1/admin/overview` | Admin saja: `{now, me, tables:[{name,rows}], guestbook:{total,hidden,reported}, journal:{fetched_at,source,snapshots,github_configured}, migrations:{applied,latest}}`. `me` = delapan karakter pertama hash IP pemanggil. Tidak pernah memuat token atau nilai secret |
+| GET | `/api/v1/admin/audit?before=<id>&limit=<n>` | Admin saja: `{"items":[{id,at,action,target,who}]}`, terbaru dulu (default 50, maks 100, `before` = halaman lebih lama). Hanya aksi yang berhasil, tanpa isi data |
 
 Endpoint konten: baris dengan URL tidak aman dibuang di server (URL opsional radio yang buruk dikosongkan), klien memeriksa ulang dengan `api_types::validate`. Respons sukses memakai `Cache-Control: public, max-age=60, stale-while-revalidate=300`; error tetap `no-store`. Database tidak terjangkau → `503` kode `unavailable`; data yang bentuknya salah → `500`. Method selain `GET` → `405`.
 
@@ -45,7 +49,7 @@ Endpoint konten: baris dengan URL tidak aman dibuang di server (URL opsional rad
 
 Pembatas kecepatan: **5 entri per menit dan 40 per jam per pengirim**, disimpan di tabel `chat_rate_limits` (migrasi `0007`). Kunci pengirim = SHA-256(`RATE_LIMIT_SALT` + IP dari `CF-Connecting-IP`), jadi alamat IP asli tidak pernah ditulis ke database. Batas menit diperiksa dulu; kalau penuh, hitungan jam tidak ikut naik. Baris lama dibersihkan di transaksi yang sama. Dipilih tabel di database (bukan binding Rate Limiting Cloudflare) karena binding itu hanya konsisten per lokasi dan tidak dirancang untuk kunci berupa IP. **Tidak ada batas global**: banyak IP berbeda tetap bisa memenuhi buku tamu; itulah gunanya moderasi di bawah.
 
-**Moderasi (migrasi `0008`).** Pembaca melaporkan lewat `POST /messages/{id}/report`; tabel `message_reports` menyimpan satu baris per (entri, hash pelapor), jadi satu orang tidak bisa menggelembungkan hitungan. Tidak ada penyembunyian otomatis (laporan massal tidak boleh bisa membungkam orang lain). Admin melihat daftar dan menyembunyikan entri lewat `curl`; CORS sengaja **tidak** mengizinkan header `Authorization` maupun `DELETE`, jadi browser situs mana pun tidak bisa memanggil endpoint admin. Token dibandingkan dengan perbandingan waktu-konstan (lewat digest SHA-256) dan endpoint admin **gagal tertutup**: token tidak diset atau kurang dari 32 karakter → semua permintaan admin `401`.
+**Moderasi (migrasi `0008`).** Pembaca melaporkan lewat `POST /messages/{id}/report`; tabel `message_reports` menyimpan satu baris per (entri, hash pelapor), jadi satu orang tidak bisa menggelembungkan hitungan. Tidak ada penyembunyian otomatis (laporan massal tidak boleh bisa membungkam orang lain). Admin melihat daftar dan menyembunyikan entri lewat `curl` (dashboard `/admin/` akan memakainya di D6b); CORS sengaja **tidak** mengizinkan header `Authorization` maupun `DELETE`, jadi browser situs mana pun tidak bisa memanggil endpoint admin. Dashboard memanggilnya dari origin yang sama (Worker ini), jadi CORS tidak perlu dilonggarkan. Token dibandingkan dengan perbandingan waktu-konstan (lewat digest SHA-256) dan endpoint admin **gagal tertutup**: token tidak diset atau kurang dari 32 karakter → semua permintaan admin `401`.
 
 ```sh
 export API=https://<worker>.workers.dev
@@ -55,6 +59,16 @@ curl -s -H "Authorization: Bearer $ADMIN_TOKEN" "$API/api/v1/admin/reports"
 curl -s -X DELETE -H "Authorization: Bearer $ADMIN_TOKEN" "$API/api/v1/admin/messages/42" -w '%{http_code}\n'   # 204
 curl -s -X POST -H "Authorization: Bearer $ADMIN_TOKEN" "$API/api/v1/admin/journal/refresh"                     # {"fetched_at":"…"}
 ```
+
+**Dashboard admin (D6a, migrasi `0010`).** Tujuannya: tidak perlu `curl` lagi. Di tahap ini fondasinya: login, Ringkasan, dan Riwayat. Journal dan Guestbook menyusul di D6b, editor data di D6c.
+
+- **Di mana.** `web/admin/` (HTML, CSS, JavaScript biasa; tanpa npm, tanpa build) dilayani Worker yang sama lewat Workers Static Assets (`[assets]` di `wrangler.toml`). Alamatnya `https://<worker>.workers.dev/admin/`. Karena satu origin dengan API, CORS **tidak dilonggarkan**: situs publik (tquilla.is-a.dev) tidak membawa kode admin sama sekali dan tidak bisa memanggil endpoint admin. Pustaka UI (htm + Preact, 13 KB) disalin ke `web/admin/vendor/` dengan SHA-256 yang dites; tidak ada skrip dari host lain.
+- **Alamatnya bukan rahasia** (repo ini publik). Yang melindungi adalah `ADMIN_TOKEN` yang diperiksa server, bukan path yang disembunyikan.
+- **Masuk.** Ketik token di kolom password (password manager bisa mengisinya). Token hanya disimpan di memori halaman: tidak di URL, `localStorage`, `sessionStorage`, atau cookie, dan hilang saat halaman ditutup. Dashboard terkunci sendiri setelah 10 menit tanpa aktivitas, juga ada tombol Kunci. Token salah atau sesi berakhir → kembali ke layar masuk.
+- **Pembatas percobaan gagal** (`panel::check_access`, tabel `admin_attempts`): 10 percobaan gagal per jendela 15 menit per IP (hash) → `429` + `Retry-After`, **juga untuk token yang benar** selama terkunci. Hanya kegagalan yang menulis ke database. Admin mati (token kosong atau < 32 karakter) → `401` tanpa menyentuh database. Token benar tetapi database mati → `503`; token salah dan database mati → tetap `401`.
+- **Riwayat** (`admin_audit`): mencatat login, refresh journal, dan penyembunyian entri, dengan hash IP delapan karakter. Tidak berisi isi data. Paling baru 500 baris. Gagal mencatat tidak membatalkan aksinya (hanya tercatat di log).
+- **CSP ketat** (`web/_headers`): `default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; ...`, tidak ada inline, tidak boleh di-frame, `noindex`, `no-store`. Semua data dari server ditampilkan sebagai teks (tidak ada `innerHTML`; dites).
+- **Kolom baru di tabel tidak lewat dashboard.** Perubahan skema hanya lewat berkas di `migrations/`.
 
 Konfigurasi baru (tidak ada di repo):
 
@@ -71,7 +85,7 @@ Konfigurasi baru (tidak ada di repo):
 - **Nilai dari database tidak dipercaya.** Nama repo dikirim ke GitHub sebagai *variabel* GraphQL (`$repo0`, `$repo1`, ...), tidak pernah disisipkan ke teks query; akun dan nama repo diperiksa ulang saat dibaca (huruf, angka, `-`, `.`, `_`) dan baris yang buruk dibuang. `CHECK` di tabel adalah pagar terakhir.
 - **Tanpa HTML.** Worker lama membuat `monthly_focus_html` dengan menempelkan nama repo mentah ke string HTML yang lalu ditampilkan klien lewat `dangerous_inner_html`. Sekarang payload hanya berisi data (`monthly_focus: {repo, language}`); klien menyusun kalimatnya. `Data::validate` dijalankan sebelum menyimpan **dan** sebelum mengirim.
 - **Perbedaan kecil dari Worker lama** (disengaja): commit per repositori hanya diminta untuk bulan ini (dulu 12 bulan lalu disaring; lebih ringan untuk batas CPU 10 ms), periode "tahun lalu" berakhir sedetik sebelum periode sekarang (dulu kehilangan hari terakhirnya), hari tersibuk tidak menyertakan hari tanpa kontribusi, dan hari produktif tanpa aktivitas jatuh ke hari ini (dulu selalu Minggu).
-- **Refresh manual** lewat `POST /admin/journal/refresh` (curl saja; CORS tetap tidak mengizinkan `Authorization`). Berguna tepat setelah deploy pertama, supaya halaman tidak kosong sampai cron pertama berjalan.
+- **Refresh manual** lewat `POST /admin/journal/refresh` (curl; tombolnya masuk dashboard di D6b; CORS tetap tidak mengizinkan `Authorization`). Berguna tepat setelah deploy pertama, supaya halaman tidak kosong sampai cron pertama berjalan.
 - Batas plan gratis (lihat [dokumentasi Cloudflare](https://developers.cloudflare.com/workers/platform/limits)): **CPU 10 ms per eksekusi, termasuk cron**, dan 5 cron per akun. Menunggu jaringan tidak dihitung; parse JSON dan transformasi dihitung. Parse memakai struct yang hanya memuat kolom yang dipakai. Angka sebenarnya belum terukur (lihat bawah).
 
 Respons `GET /messages` tidak boleh di-cache (`no-store`): entri baru dan entri yang baru disembunyikan harus langsung terlihat saat Refresh.
@@ -93,6 +107,7 @@ cp crates/api/.dev.vars.example crates/api/.dev.vars   # lalu sesuaikan
 cd crates/api && npx wrangler dev                       # http://127.0.0.1:8787
 
 curl -i http://127.0.0.1:8787/api/v1/health
+# dashboard admin: http://127.0.0.1:8787/admin/  (ADMIN_TOKEN dari .dev.vars)
 ```
 
 Skema dan data awal (terminal 3, database `turso dev` harus sudah jalan):
@@ -113,6 +128,7 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
 cargo clippy -p api --target wasm32-unknown-unknown --locked -- -D warnings
 node --test scripts/migrations.test.mjs     # Node >= 22.13
+node --test scripts/admin-ui.test.mjs       # dashboard admin (Node >= 22.7)
 ```
 
 ## Deploy manual pertama (sebelum ada workflow deploy di D8)
@@ -172,7 +188,7 @@ Perubahan yang tidak kompatibel di `api-types` = tag baru; frontend memilih kapa
 
 ## Yang sudah dan belum terverifikasi
 
-Sudah (dijalankan di sandbox dengan rustc 1.97.0): `cargo fmt`, `cargo clippy --workspace --all-targets --locked -D warnings` di target host, 140 test Rust (kontrak dan validator `api-types`, klien dan runner migrasi `turso-http`, CLI `migrate`, serta router/CORS/health/konten/guestbook/moderasi `api` lewat `tower::oneshot` dan transport palsu) dan 31 test node (termasuk semua query `.sql`, termasuk `before`, entri tersembunyi, laporan, dan migrasi `0008` di atas data yang sudah ada, terhadap SQLite sungguhan). Migrasi dan seed diterapkan di SQLite 3.45 sungguhan (Python `sqlite3` dan `node:sqlite`): skema valid, seed idempotent, CHECK menolak URL `javascript:`, avatar base64, JSON rusak, dsb. CLI `migrate` dijalankan end-to-end lewat server Hrana tiruan (skrip sementara di atas SQLite, bukan `sqld`): `up`, `seed`, jalan ulang, checksum berubah ditolak, migrasi gagal ter-rollback. Request klien Turso dicocokkan dengan keluaran encoder referensi resmi `@libsql/hrana-client` 0.10.0, dan fixture respons diterima decoder referensinya.
+Sudah (dijalankan di sandbox dengan rustc 1.97.0): `cargo fmt`, `cargo clippy --workspace --all-targets --locked -D warnings` di target host, 208 test Rust (kontrak dan validator `api-types`, klien dan runner migrasi `turso-http`, CLI `migrate`, serta router/CORS/health/konten/guestbook/moderasi `api` lewat `tower::oneshot` dan transport palsu) dan 86 test node (66 untuk SQL dan 20 untuk dashboard; termasuk semua query `.sql`, termasuk `before`, entri tersembunyi, laporan, dan migrasi `0008` di atas data yang sudah ada, terhadap SQLite sungguhan). Migrasi dan seed diterapkan di SQLite 3.45 sungguhan (Python `sqlite3` dan `node:sqlite`): skema valid, seed idempotent, CHECK menolak URL `javascript:`, avatar base64, JSON rusak, dsb. CLI `migrate` dijalankan end-to-end lewat server Hrana tiruan (skrip sementara di atas SQLite, bukan `sqld`): `up`, `seed`, jalan ulang, checksum berubah ditolak, migrasi gagal ter-rollback. Request klien Turso dicocokkan dengan keluaran encoder referensi resmi `@libsql/hrana-client` 0.10.0, dan fixture respons diterima decoder referensinya.
 
 **Belum:**
 - Kompilasi ke `wasm32-unknown-unknown` dan `worker-build` (sandbox tidak punya target itu; job `wasm` di CI yang pertama kali membuktikannya).
@@ -181,6 +197,7 @@ Sudah (dijalankan di sandbox dengan rustc 1.97.0): `cargo fmt`, `cargo clippy --
 - Batas plan gratis Cloudflare (ukuran wasm, waktu CPU per request): cek angkanya di dokumentasi Cloudflare terhadap ukuran hasil build.
 - Guestbook dan moderasi (D4) belum dijalankan terhadap `sqld`/Turso cloud dan Worker sungguhan: logikanya diuji dengan transport palsu dan, end-to-end, lewat server Hrana tiruan di atas SQLite (5 pesan diterima, ke-6 ditolak `429`, pengirim lain tidak terkena, menit berikutnya longgar lagi; ini hasil D4a, belum diulang untuk laporan/admin). Endpoint laporan dan admin baru diuji lewat `tower::oneshot` dan SQLite, belum dengan `ADMIN_TOKEN` sungguhan di Worker. Header `CF-Connecting-IP` hanya ada di Cloudflare; lokal semua pengirim dihitung satu (`local`).
 - Jurnal (D5): logika (query, transformasi, simpan, baca, refresh, batas refresh manual) diuji dengan fixture GraphQL buatan sendiri dan transport palsu, dan SQL-nya di SQLite sungguhan (`scripts/migrations.test.mjs`). **Belum**: panggilan nyata ke `api.github.com` (tidak ada token di sandbox, jadi bentuk respons GitHub yang sebenarnya belum dicocokkan), cron yang berjalan di Cloudflare, dan waktu CPU per eksekusi (cek di dashboard Cloudflare setelah cron pertama; kalau melewati 10 ms, eksekusi gagal dan snapshot lama dipakai terus).
+- Dashboard admin (D6a): backend (gerbang token, pembatas, riwayat, ringkasan) diuji lewat `tower::oneshot`, transport palsu, dan SQLite sungguhan; UI diuji logikanya, klien API (fetch palsu), dan aturan statis (CSP, tanpa `innerHTML`/`eval`, hash pustaka). Satu kali di sandbox, halaman juga dijalankan di jsdom dengan server palsu (masuk, token salah, terkunci, Ringkasan, Riwayat + halaman berikutnya, kunci manual, kunci otomatis, teks dari server tidak menjadi markup); skrip itu tidak ada di repo (butuh jsdom). **Belum**: browser sungguhan; `wrangler dev`/`deploy` dengan `[assets]` untuk Worker Rust (dokumentasi Cloudflare hanya memberi contoh JavaScript dan Python); apakah pola `/*` di `web/_headers` benar-benar memasang CSP pada `/admin/` (cek header respons di DevTools setelah deploy); `/admin` tanpa garis miring dialihkan ke `/admin/`; serta pembatas dengan `CF-Connecting-IP` dan `ADMIN_TOKEN` sungguhan.
 - Dev shell Nix (`flake.nix`, `devenv.nix`): hanya sintaksnya yang diperiksa.
 
 ## Lisensi

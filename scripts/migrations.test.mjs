@@ -51,7 +51,7 @@ test("all migrations apply to an empty database", () => {
     .all()
     .map((r) => r.name);
   assert.deepEqual(tables, [
-    "bookmarks", "chat_messages", "chat_rate_limits", "embience_preset_items", "embience_presets",
+    "admin_attempts", "admin_audit", "bookmarks", "chat_messages", "chat_rate_limits", "embience_preset_items", "embience_presets",
     "embiences", "generations", "journal_pinned_repos", "journal_profile", "journal_snapshots",
     "journal_stack", "message_reports", "radio_stations",
   ]);
@@ -120,6 +120,14 @@ const rejected = [
   ["empty stack name", "INSERT INTO journal_stack (name) VALUES ('')"],
   ["duplicate stack name", "INSERT INTO journal_stack (name) VALUES ('Rust')"],
   ["preset item with unknown ids", "INSERT INTO embience_preset_items (preset_id, embience_id) VALUES (99, 99)"],
+  ["empty attempt key", "INSERT INTO admin_attempts (key, window) VALUES ('', 1)"],
+  ["negative attempt window", "INSERT INTO admin_attempts (key, window) VALUES ('k', -1)"],
+  ["zero attempt hits", "INSERT INTO admin_attempts (key, window, hits) VALUES ('k', 1, 0)"],
+  ["audit with a malformed timestamp", "INSERT INTO admin_audit (at, action, who) VALUES ('now', 'login', 'w')"],
+  ["audit with an empty action", "INSERT INTO admin_audit (at, action, who) VALUES ('2026-01-01T00:00:00Z', '', 'w')"],
+  ["audit with an empty target", "INSERT INTO admin_audit (at, action, target, who) VALUES ('2026-01-01T00:00:00Z', 'a', '', 'w')"],
+  ["audit with a too long target", `INSERT INTO admin_audit (at, action, target, who) VALUES ('2026-01-01T00:00:00Z', 'a', '${"t".repeat(121)}', 'w')`],
+  ["audit without a who", "INSERT INTO admin_audit (at, action, who) VALUES ('2026-01-01T00:00:00Z', 'a', '')"],
 ];
 
 for (const [label, sql] of rejected) {
@@ -430,4 +438,109 @@ test("the sample journal snapshot has the current payload shape (no markup field
   assert.equal(typeof c.growth_percent, "number");
   assert.ok(Array.isArray(c.timeline) && c.timeline.every((d) => /^\d{4}-\d{2}-\d{2}$/.test(d.date)));
   assert.ok(c.languages.every((l) => /^#[0-9a-f]{6}$/.test(l.color)));
+});
+
+// ---- Dashboard admin (D6a): pembatas percobaan gagal, riwayat, ringkasan
+
+test("admin attempts: failures count per key and window; cleanup keeps the current and previous window", () => {
+  const db = freshDb();
+  const hit = (key, window) => db.prepare(sqlOf("admin_attempts_hit")).get(key, window).hits;
+  const read = (key, window) => db.prepare(sqlOf("admin_attempts_count")).get(key, window)?.hits ?? 0;
+  assert.equal(read("ip1", 10), 0, "no row before the first failure");
+  assert.equal(hit("ip1", 10), 1);
+  assert.equal(hit("ip1", 10), 2);
+  assert.equal(hit("ip2", 10), 1, "other key");
+  assert.equal(hit("ip1", 11), 1, "next window starts again");
+  assert.equal(read("ip1", 10), 2);
+  assert.equal(read("ip1", 11), 1);
+  db.prepare(sqlOf("admin_attempts_hit")).get("ip1", 12);
+  db.prepare(sqlOf("admin_attempts_cleanup")).run(11);
+  const left = db
+    .prepare("SELECT key, window FROM admin_attempts ORDER BY key, window")
+    .all()
+    .map((r) => ({ ...r }));
+  assert.deepEqual(left, [
+    { key: "ip1", window: 11 },
+    { key: "ip1", window: 12 },
+  ]);
+});
+
+test("admin audit: newest first with a cursor, and pruning keeps only the newest N", () => {
+  const db = freshDb();
+  const insert = db.prepare(sqlOf("admin_audit_insert"));
+  for (let i = 0; i < 7; i++) {
+    const id = insert.get(`2026-10-22T00:00:0${i}Z`, i === 0 ? "login" : "message.hide", i === 0 ? null : `message:${i}`, "abcdef0123456789").id;
+    assert.equal(id, i + 1);
+  }
+  const list = (before, limit) =>
+    db.prepare(sqlOf("admin_audit_list")).all(before, limit).map((r) => ({ ...r }));
+  assert.deepEqual(list(null, 3).map((r) => r.id), [7, 6, 5]);
+  assert.deepEqual(list(5, 10).map((r) => r.id), [4, 3, 2, 1]);
+  assert.equal(list(null, 1)[0].target, "message:6");
+  assert.equal(list(null, 10).at(-1).target, null);
+  assert.deepEqual(Object.keys(list(null, 1)[0]), ["id", "at", "action", "target", "who"]);
+
+  db.prepare(sqlOf("admin_audit_prune")).run(3);
+  assert.deepEqual(list(null, 10).map((r) => r.id), [7, 6, 5], "keeps the newest 3");
+  db.prepare(sqlOf("admin_audit_prune")).run(500);
+  assert.equal(count(db, "admin_audit"), 3, "a large keep value removes nothing");
+});
+
+test("admin overview: counts every listed table, the guestbook and the journal, in one row", () => {
+  const db = seededDb();
+  // `_migrations` is created by the runner (crates/turso-http/src/migrate.rs), not by a migration file.
+  db.exec(
+    "CREATE TABLE IF NOT EXISTS _migrations (name TEXT PRIMARY KEY, checksum TEXT NOT NULL, applied_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')))",
+  );
+  for (const m of sqlFiles("migrations")) {
+    db.prepare("INSERT INTO _migrations (name, checksum) VALUES (?, 'x')").run(m.name.replace(/\.sql$/, ""));
+  }
+  db.exec(`
+    INSERT INTO chat_messages (username, message, created_at) VALUES
+      ('zz-a', 'one', '2026-01-01T00:00:00Z'), ('zz-b', 'two', '2026-01-01T00:00:01Z'), ('zz-c', 'three', '2026-01-01T00:00:02Z');
+    UPDATE chat_messages SET deleted_at = '2026-01-02T00:00:00Z' WHERE username = 'zz-c';
+  `);
+  const idOf = (u) => db.prepare("SELECT id FROM chat_messages WHERE username = ?").get(u).id;
+  const report = db.prepare("INSERT INTO message_reports (message_id, reporter, created_at) VALUES (?, ?, '2026-01-03T00:00:00Z')");
+  report.run(idOf("zz-a"), "r1");
+  report.run(idOf("zz-a"), "r2");
+  report.run(idOf("zz-b"), "r1");
+  report.run(idOf("zz-c"), "r1");
+  const rows = db.prepare(sqlOf("admin_overview")).all();
+  assert.equal(rows.length, 1);
+  const row = { ...rows[0] };
+  for (const t of [
+    "generations", "bookmarks", "radio_stations", "embiences", "embience_presets", "embience_preset_items",
+    "chat_messages", "message_reports", "journal_snapshots", "journal_pinned_repos", "journal_stack", "admin_audit",
+  ]) {
+    assert.equal(row[t], count(db, t), t);
+  }
+  assert.equal(row.messages_hidden, 1);
+  assert.equal(row.messages_reported, 2, "distinct visible entries with reports; the hidden one does not count");
+  assert.equal(row.migrations_applied, sqlFiles("migrations").length);
+  assert.equal(row.migrations_latest, sqlFiles("migrations").at(-1).name.replace(/\.sql$/, ""));
+  assert.equal(row.journal_fetched_at, db.prepare(sqlOf("journal_latest_time")).get().fetched_at);
+  assert.ok(["github", "seed"].includes(row.journal_source));
+});
+
+test("admin overview: an empty database reports zeros and nulls, not errors", () => {
+  const db = freshDb();
+  db.exec("CREATE TABLE _migrations (name TEXT PRIMARY KEY, checksum TEXT NOT NULL)");
+  const row = { ...db.prepare(sqlOf("admin_overview")).get() };
+  assert.equal(row.chat_messages, 0);
+  assert.equal(row.messages_reported, 0);
+  assert.equal(row.migrations_applied, 0);
+  assert.equal(row.migrations_latest, null);
+  assert.equal(row.journal_fetched_at, null);
+  assert.equal(row.journal_source, null);
+});
+
+test("admin queries use bound parameters and an explicit order where they list rows", () => {
+  const list = readFileSync(join(root, "crates/api/src/queries/admin_audit_list.sql"), "utf8");
+  assert.match(list, /\bORDER BY id DESC\b/);
+  assert.match(list, /\bLIMIT\s+\?2\s*$/m);
+  for (const name of ["admin_attempts_count", "admin_attempts_hit", "admin_attempts_cleanup", "admin_audit_insert", "admin_audit_prune", "admin_audit_list"]) {
+    const sql = readFileSync(join(root, "crates/api/src/queries", `${name}.sql`), "utf8");
+    assert.match(sql, /\?\d/, `${name} must take its values as parameters`);
+  }
 });

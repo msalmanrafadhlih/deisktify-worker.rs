@@ -24,6 +24,7 @@ use crate::{
     error::AppError,
     github::GithubClient,
     journal::{self, JournalError},
+    panel::{self, Access, PanelError},
 };
 
 /// Konten jarang berubah: browser boleh memakai salinan 1 menit dan menyajikan
@@ -327,11 +328,151 @@ pub async fn message_report(
     }
 }
 
+// ------------------------------------------------------------ Admin (D4b, D6a)
+
+/// Pesan error umum; detail hanya ke log Worker.
+pub fn panel_error(e: &PanelError) -> AppError {
+    use turso_http::Error;
+    match e {
+        PanelError::Db(Error::Config(_) | Error::Transport(_) | Error::Http { .. }) => {
+            AppError::UNAVAILABLE
+        }
+        PanelError::Db(_) | PanelError::BadData(_) => AppError::INTERNAL,
+    }
+}
+
+fn too_many(retry_after_secs: u32) -> Response {
+    let mut res = AppError::RATE_LIMITED.into_response();
+    if let Ok(v) = HeaderValue::from_str(&retry_after_secs.to_string()) {
+        res.headers_mut().insert(header::RETRY_AFTER, v);
+    }
+    res
+}
+
+/// Permintaan admin yang sudah lolos gerbang.
+struct Admin {
+    client: turso_http::Client<WorkerTransport>,
+    /// Hash IP pelaku (kunci pembatas dan baris riwayat).
+    who: String,
+    now: i64,
+}
+
+/// Gerbang semua endpoint admin: token (`admin::authorized`), lalu pembatas
+/// percobaan gagal (`panel::check_access`). Urutannya sengaja begini:
+///
+/// - Admin mati (token kosong atau pendek): 401 tanpa menyentuh database.
+/// - Token salah dan database tidak bisa dipakai: tetap 401 (gagal tertutup).
+/// - Token benar tetapi database tidak bisa dipakai: 503.
+/// - Terkunci: 429 + `Retry-After`, juga untuk token yang benar.
+async fn admin_gate(
+    config: &Config,
+    headers: &HeaderMap,
+    name: &'static str,
+) -> Result<Admin, Response> {
+    if !admin::enabled(&config.admin_token) {
+        return Err(AppError::UNAUTHORIZED.into_response());
+    }
+    let authorized = admin::authorized(&config.admin_token, authorization(headers));
+    let client = match db_client(config, name) {
+        Ok(c) => c,
+        Err(e) if authorized => return Err(e.into_response()),
+        Err(_) => return Err(AppError::UNAUTHORIZED.into_response()),
+    };
+    let who = chat::ip_key(&client_ip(headers), config.rate_salt.expose());
+    let now = now_secs();
+    match panel::check_access(&client, &who, now, authorized).await {
+        Ok(Access::Granted) => Ok(Admin { client, who, now }),
+        Ok(Access::Denied) => Err(AppError::UNAUTHORIZED.into_response()),
+        Ok(Access::Locked { retry_after_secs }) => Err(too_many(retry_after_secs)),
+        Err(e) => {
+            worker::console_error!("{name}: admin gate: {e}");
+            Err(if authorized {
+                panel_error(&e).into_response()
+            } else {
+                AppError::UNAUTHORIZED.into_response()
+            })
+        }
+    }
+}
+
+/// Memasang gerbang; kalau ditolak, mengembalikan jawabannya dari handler.
+macro_rules! gate {
+    ($config:expr, $headers:expr, $name:expr) => {
+        match admin_gate($config, $headers, $name).await {
+            Ok(admin) => admin,
+            Err(res) => return Ok(res),
+        }
+    };
+}
+
+/// Mencatat aksi yang sudah berhasil. Gagal mencatat tidak membatalkan aksinya;
+/// hanya masuk log.
+async fn audit(admin: &Admin, action: &str, target: Option<&str>) {
+    if let Err(e) = panel::record(&admin.client, &admin.who, admin.now, action, target).await {
+        worker::console_error!("audit {action}: {e}");
+    }
+}
+
 /// Header `Authorization` mentah, kalau ada dan berupa teks.
 fn authorization(headers: &HeaderMap) -> Option<&str> {
     headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
+}
+
+async fn overview_response(config: &Config, admin: &Admin) -> Result<Response, AppError> {
+    let ctx = panel::Context {
+        who: &admin.who,
+        now_secs: admin.now,
+        github_configured: !config.github_token.expose().is_empty(),
+    };
+    match panel::overview(&admin.client, &ctx).await {
+        Ok(o) => Ok(Json(o).into_response()),
+        Err(e) => {
+            worker::console_error!("admin overview: {e}");
+            Ok(panel_error(&e).into_response())
+        }
+    }
+}
+
+/// `POST /api/v1/admin/login`: memeriksa token, mencatat "login", menjawab ringkasan.
+#[worker::send]
+pub async fn admin_login(
+    State(config): State<Arc<Config>>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let admin = gate!(&config, &headers, "admin login");
+    audit(&admin, "login", None).await;
+    overview_response(&config, &admin).await
+}
+
+/// `GET /api/v1/admin/overview`: ringkasan untuk dashboard.
+#[worker::send]
+pub async fn admin_overview(
+    State(config): State<Arc<Config>>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let admin = gate!(&config, &headers, "admin overview");
+    overview_response(&config, &admin).await
+}
+
+/// `GET /api/v1/admin/audit?before=<id>&limit=<n>`: riwayat aksi admin.
+#[worker::send]
+pub async fn admin_audit(
+    State(config): State<Arc<Config>>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let admin = gate!(&config, &headers, "admin audit");
+    let q = panel::parse_audit_query(query.as_deref())
+        .ok_or(AppError::bad_request("Invalid query parameters."))?;
+    match panel::audit_list(&admin.client, &q).await {
+        Ok(items) => Ok(Json(Items { items }).into_response()),
+        Err(e) => {
+            worker::console_error!("admin audit: {e}");
+            Ok(panel_error(&e).into_response())
+        }
+    }
 }
 
 /// `GET /api/v1/admin/reports`: entri yang dilaporkan, paling banyak dulu.
@@ -340,11 +481,8 @@ pub async fn admin_reports(
     State(config): State<Arc<Config>>,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
-    if !admin::authorized(&config.admin_token, authorization(&headers)) {
-        return Err(AppError::UNAUTHORIZED);
-    }
-    let client = db_client(&config, "admin reports")?;
-    match chat::reported(&client).await {
+    let admin = gate!(&config, &headers, "admin reports");
+    match chat::reported(&admin.client).await {
         Ok(items) => Ok(Json(Items { items }).into_response()),
         Err(e) => {
             worker::console_error!("admin reports: {e}");
@@ -361,13 +499,13 @@ pub async fn admin_delete(
     Path(id): Path<String>,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
-    if !admin::authorized(&config.admin_token, authorization(&headers)) {
-        return Err(AppError::UNAUTHORIZED);
-    }
+    let admin = gate!(&config, &headers, "admin delete");
     let id = parse_id(&id)?;
-    let client = db_client(&config, "admin delete")?;
-    match chat::hide(&client, id, now_secs()).await {
-        Ok(true) => Ok(StatusCode::NO_CONTENT.into_response()),
+    match chat::hide(&admin.client, id, admin.now).await {
+        Ok(true) => {
+            audit(&admin, "message.hide", Some(&format!("message:{id}"))).await;
+            Ok(StatusCode::NO_CONTENT.into_response())
+        }
         Ok(false) => Err(AppError::NOT_FOUND),
         Err(e) => {
             worker::console_error!("admin delete: {e}");
@@ -430,16 +568,16 @@ pub async fn admin_journal_refresh(
     State(config): State<Arc<Config>>,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
-    if !admin::authorized(&config.admin_token, authorization(&headers)) {
-        return Err(AppError::UNAUTHORIZED);
-    }
+    let admin = gate!(&config, &headers, "journal refresh");
     if config.github_token.expose().is_empty() {
         return Err(AppError::NOT_CONFIGURED);
     }
-    let client = db_client(&config, "journal refresh")?;
     let github = GithubClient::new(config.github_token.expose());
-    match journal::refresh_if_due(&client, &github, now_secs()).await {
-        Ok(done) => Ok(Json(done).into_response()),
+    match journal::refresh_if_due(&admin.client, &github, admin.now).await {
+        Ok(done) => {
+            audit(&admin, "journal.refresh", None).await;
+            Ok(Json(done).into_response())
+        }
         Err(e) => {
             if !matches!(e, JournalError::TooSoon { .. }) {
                 worker::console_error!("journal refresh: {e}");

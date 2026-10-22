@@ -52,6 +52,15 @@ pub mod paths {
     /// admin (`Authorization: Bearer`), tidak untuk browser.
     pub const ADMIN_JOURNAL_REFRESH: &str = "/api/v1/admin/journal/refresh";
 
+    /// `POST`: masuk ke dashboard admin (D6a). Memeriksa token, mencatat "login",
+    /// dan menjawab ringkasan. Dipanggil dashboard yang dilayani Worker yang sama
+    /// (satu origin), bukan dari situs publik.
+    pub const ADMIN_LOGIN: &str = "/api/v1/admin/login";
+    /// `GET`: ringkasan untuk dashboard (jumlah baris, status jurnal, migrasi).
+    pub const ADMIN_OVERVIEW: &str = "/api/v1/admin/overview";
+    /// `GET`: riwayat aksi admin, terbaru dulu (`?before=<id>`, `&limit=<n>`).
+    pub const ADMIN_AUDIT: &str = "/api/v1/admin/audit";
+
     /// Semua path; tambahkan endpoint baru di sini juga supaya test prefix mencakupnya.
     pub const ALL: &[&str] = &[
         HEALTH,
@@ -66,6 +75,9 @@ pub mod paths {
         ADMIN_MESSAGE,
         JOURNAL,
         ADMIN_JOURNAL_REFRESH,
+        ADMIN_LOGIN,
+        ADMIN_OVERVIEW,
+        ADMIN_AUDIT,
     ];
 
     /// Path `POST` untuk melaporkan entri `id`.

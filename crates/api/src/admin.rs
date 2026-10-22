@@ -5,9 +5,11 @@
 //!   berarti **tidak ada** yang bisa masuk, bukan "semua boleh".
 //! - Perbandingan tidak bocor lewat waktu: kedua sisi di-hash dulu (panjangnya
 //!   sama), lalu dibandingkan tanpa berhenti di byte pertama yang berbeda.
-//! - Tidak untuk browser: CORS tidak mengizinkan header `Authorization` dan
-//!   metode `DELETE`, jadi halaman web mana pun tidak bisa memanggilnya. Alatnya
-//!   `curl` (lihat README).
+//! - Browser hanya lewat dashboard yang dilayani Worker yang sama (D6a, satu
+//!   origin, folder `web/admin/`). CORS tetap tidak mengizinkan header
+//!   `Authorization` dan metode `DELETE`, jadi situs lain (termasuk situs publik)
+//!   tidak bisa memanggil endpoint admin. `curl` tetap bisa dengan token yang sama.
+//! - Percobaan gagal dibatasi per IP (hash) oleh `panel::check_access`.
 
 use sha2::{Digest, Sha256};
 
@@ -31,12 +33,18 @@ fn digest(s: &str) -> [u8; 32] {
     Sha256::digest(s.as_bytes()).into()
 }
 
+/// `true` jika `ADMIN_TOKEN` cukup panjang untuk dipakai. Kalau tidak, admin
+/// mati total dan tidak ada yang perlu dibatasi.
+pub fn enabled(configured: &Secret) -> bool {
+    configured.expose().chars().count() >= MIN_TOKEN_CHARS
+}
+
 /// `true` hanya jika admin diaktifkan dan tokennya cocok persis.
 pub fn authorized(configured: &Secret, authorization: Option<&str>) -> bool {
-    let expected = configured.expose();
-    if expected.chars().count() < MIN_TOKEN_CHARS {
+    if !enabled(configured) {
         return false;
     }
+    let expected = configured.expose();
     let Some(given) = bearer(authorization) else {
         return false;
     };
@@ -78,6 +86,13 @@ mod tests {
         ] {
             assert!(!authorized(&t, bad), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn admin_is_enabled_only_with_a_long_enough_token() {
+        assert!(!enabled(&secret("")));
+        assert!(!enabled(&secret(&"x".repeat(MIN_TOKEN_CHARS - 1))));
+        assert!(enabled(&secret(&"x".repeat(MIN_TOKEN_CHARS))));
     }
 
     #[test]

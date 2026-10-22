@@ -8,6 +8,7 @@
 //! - `content`/`routes`: endpoint baca konten (D3): query + validasi, lalu handler
 //! - `chat`  : Guestbook (D4): validasi, pembatas kecepatan, baca/tulis/laporkan/hapus
 //! - `admin` : otorisasi admin lewat `ADMIN_TOKEN`
+//! - `panel` : dashboard admin (D6a): pembatas percobaan gagal, riwayat aksi, ringkasan
 //! - `journal`/`github`: GitHub Journal (D5): Cron Trigger mengambil statistik dari
 //!   GitHub, `GET /journal` membaca snapshot terakhir
 //! - `time`  : waktu UTC tanpa dependensi tanggal
@@ -24,8 +25,12 @@ pub mod error;
 pub mod github;
 pub mod health;
 pub mod journal;
+pub mod panel;
 pub mod routes;
 pub mod time;
+
+#[cfg(test)]
+mod testing;
 
 use std::sync::Arc;
 
@@ -68,6 +73,12 @@ pub fn app(config: Arc<Config>) -> Router {
             api_types::paths::ADMIN_JOURNAL_REFRESH,
             post(routes::admin_journal_refresh),
         )
+        .route(api_types::paths::ADMIN_LOGIN, post(routes::admin_login))
+        .route(
+            api_types::paths::ADMIN_OVERVIEW,
+            get(routes::admin_overview),
+        )
+        .route(api_types::paths::ADMIN_AUDIT, get(routes::admin_audit))
         .fallback(error::not_found)
         .method_not_allowed_fallback(error::method_not_allowed)
         .with_state(config)
@@ -547,29 +558,23 @@ mod tests {
     }
 
     #[test]
-    fn a_valid_admin_token_reaches_validation_and_then_the_database() {
+    fn a_valid_admin_token_passes_the_gate_and_then_needs_the_database() {
         futures_executor::block_on(async {
-            let (status, _, _) = call_with(
-                with_admin(),
-                admin_req(Method::GET, "/api/v1/admin/reports", Some(ADMIN)),
-            )
-            .await;
-            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "no database");
-
-            let (status, _, json) = call_with(
-                with_admin(),
-                admin_req(Method::DELETE, "/api/v1/admin/messages/abc", Some(ADMIN)),
-            )
-            .await;
-            assert_eq!(status, StatusCode::BAD_REQUEST);
-            assert_eq!(json["error"]["code"], "bad_request");
-
-            let (status, _, _) = call_with(
-                with_admin(),
-                admin_req(Method::DELETE, "/api/v1/admin/messages/7", Some(ADMIN)),
-            )
-            .await;
-            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "no database");
+            for (method, path) in [
+                (Method::GET, "/api/v1/admin/reports"),
+                (Method::DELETE, "/api/v1/admin/messages/7"),
+                // Gerbang (token + pembatas) jalan lebih dulu daripada validasi id.
+                (Method::DELETE, "/api/v1/admin/messages/abc"),
+            ] {
+                let (status, _, json) =
+                    call_with(with_admin(), admin_req(method, path, Some(ADMIN))).await;
+                assert_eq!(
+                    status,
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "{path}: no database"
+                );
+                assert_eq!(json["error"]["code"], "unavailable");
+            }
         });
     }
 
@@ -658,23 +663,17 @@ mod tests {
     }
 
     #[test]
-    fn manual_refresh_needs_the_github_token_and_then_the_database() {
+    fn manual_refresh_with_a_valid_token_needs_the_database_and_never_echoes_secrets() {
         futures_executor::block_on(async {
             let path = api_types::paths::ADMIN_JOURNAL_REFRESH;
-            // Admin sah, tetapi GITHUB_TOKEN belum diisi.
-            let (status, _, json) =
-                call_with(with_admin(), admin_req(Method::POST, path, Some(ADMIN))).await;
-            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-            assert_eq!(json["error"]["message"], "This feature is not configured.");
-            // Keduanya ada, database tidak.
-            let (status, _, json) = call_with(
-                with_admin_and_github(),
-                admin_req(Method::POST, path, Some(ADMIN)),
-            )
-            .await;
-            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-            assert_eq!(json["error"]["code"], "unavailable");
-            assert!(!json.to_string().contains("ghp_test"));
+            for cfg in [with_admin(), with_admin_and_github()] {
+                let (status, _, json) =
+                    call_with(cfg, admin_req(Method::POST, path, Some(ADMIN))).await;
+                assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+                assert_eq!(json["error"]["code"], "unavailable");
+                let text = json.to_string();
+                assert!(!text.contains("ghp_test") && !text.contains(ADMIN));
+            }
         });
     }
 
@@ -698,6 +697,86 @@ mod tests {
                 !allowed_headers.contains("authorization"),
                 "{allowed_headers}"
             );
+        });
+    }
+
+    // ------------------------------------------------- dashboard admin (D6a)
+
+    const PANEL_PATHS: [(Method, &str); 3] = [
+        (Method::POST, api_types::paths::ADMIN_LOGIN),
+        (Method::GET, api_types::paths::ADMIN_OVERVIEW),
+        (Method::GET, api_types::paths::ADMIN_AUDIT),
+    ];
+
+    #[test]
+    fn dashboard_endpoints_are_closed_without_the_right_token() {
+        futures_executor::block_on(async {
+            for cfg in [config(), with_admin()] {
+                for (method, path) in PANEL_PATHS {
+                    for token in [None, Some("wrong"), Some("")] {
+                        let (status, _, json) =
+                            call_with(cfg.clone(), admin_req(method.clone(), path, token)).await;
+                        assert_eq!(status, StatusCode::UNAUTHORIZED, "{path} {token:?}");
+                        assert_eq!(json["error"]["code"], "unauthorized");
+                    }
+                }
+            }
+            // Admin mati: token yang sama dengan nilai kosong pun tidak membuka apa pun.
+            for (method, path) in PANEL_PATHS {
+                let (status, _, _) = call(admin_req(method, path, Some(ADMIN))).await;
+                assert_eq!(status, StatusCode::UNAUTHORIZED, "{path}");
+            }
+        });
+    }
+
+    #[test]
+    fn dashboard_endpoints_with_a_valid_token_need_the_database() {
+        futures_executor::block_on(async {
+            for (method, path) in PANEL_PATHS {
+                let (status, headers, json) =
+                    call_with(with_admin(), admin_req(method, path, Some(ADMIN))).await;
+                assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{path}");
+                assert_eq!(json["error"]["code"], "unavailable");
+                assert_eq!(headers[header::CACHE_CONTROL], "no-store");
+            }
+        });
+    }
+
+    #[test]
+    fn dashboard_endpoints_only_allow_their_own_method() {
+        futures_executor::block_on(async {
+            for (allowed, path) in PANEL_PATHS {
+                for method in [Method::GET, Method::POST, Method::PUT, Method::DELETE] {
+                    if method == allowed {
+                        continue;
+                    }
+                    let (status, _, _) =
+                        call_with(with_admin(), admin_req(method.clone(), path, Some(ADMIN))).await;
+                    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{method} {path}");
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn browsers_cannot_be_granted_dashboard_endpoints_through_cors() {
+        futures_executor::block_on(async {
+            for (method, path) in PANEL_PATHS {
+                let (status, headers, _) = call(
+                    req(Method::OPTIONS, path)
+                        .header(header::ORIGIN, SITE)
+                        .header(header::ACCESS_CONTROL_REQUEST_METHOD, method.as_str())
+                        .header(header::ACCESS_CONTROL_REQUEST_HEADERS, "authorization")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await;
+                assert_eq!(status, StatusCode::NO_CONTENT);
+                let allowed = headers[header::ACCESS_CONTROL_ALLOW_HEADERS]
+                    .to_str()
+                    .unwrap();
+                assert!(!allowed.contains("authorization"), "{path}: {allowed}");
+            }
         });
     }
 }

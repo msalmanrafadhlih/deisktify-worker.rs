@@ -1,0 +1,14 @@
+# Header untuk berkas statis dashboard admin (Workers Static Assets). Tidak berlaku
+# untuk jawaban API (itu dari kode Worker, lihat cors.rs).
+#
+# Pola `/*` sengaja: yang dilayani dari folder ini hanya /admin/. CSP-nya ketat:
+# hanya skrip dan gaya dari origin sendiri, tidak ada inline, tidak ada host lain,
+# tidak boleh di-frame.
+/*
+  Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'
+  X-Content-Type-Options: nosniff
+  X-Frame-Options: DENY
+  Referrer-Policy: no-referrer
+  X-Robots-Tag: noindex, nofollow
+  Cache-Control: no-store
+  Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=()

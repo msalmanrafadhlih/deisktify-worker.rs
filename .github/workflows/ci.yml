@@ -109,6 +109,9 @@ jobs:
       - name: Terapkan migrasi dan seed, uji constraint
         run: node --test scripts/migrations.test.mjs
 
+      - name: Dashboard admin (logika, klien API, CSP, pustaka bawaan)
+        run: node --test scripts/admin-ui.test.mjs
+
   migrate:
     name: migrasi + seed ke Turso (production)
     needs: [native, wasm, reference-fixtures, sql]
