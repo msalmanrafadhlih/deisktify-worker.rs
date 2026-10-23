@@ -25,6 +25,8 @@ pub mod error;
 pub mod github;
 pub mod health;
 pub mod journal;
+pub mod journal_admin;
+pub mod moderation;
 pub mod panel;
 pub mod routes;
 pub mod time;
@@ -37,7 +39,7 @@ use std::sync::Arc;
 use axum::{
     extract::DefaultBodyLimit,
     middleware,
-    routing::{delete, get, post},
+    routing::{delete, get, post, put},
     Router,
 };
 use tower_service::Service;
@@ -79,6 +81,47 @@ pub fn app(config: Arc<Config>) -> Router {
             get(routes::admin_overview),
         )
         .route(api_types::paths::ADMIN_AUDIT, get(routes::admin_audit))
+        .route(api_types::paths::ADMIN_JOURNAL, get(routes::admin_journal))
+        .route(
+            api_types::paths::ADMIN_JOURNAL_PROFILE,
+            put(routes::admin_journal_profile),
+        )
+        .route(
+            api_types::paths::ADMIN_JOURNAL_REPOS,
+            post(routes::admin_journal_repo_add),
+        )
+        .route(
+            api_types::paths::ADMIN_JOURNAL_REPOS_ORDER,
+            put(routes::admin_journal_repos_order),
+        )
+        .route(
+            api_types::paths::ADMIN_JOURNAL_REPO,
+            put(routes::admin_journal_repo_edit).delete(routes::admin_journal_repo_delete),
+        )
+        .route(
+            api_types::paths::ADMIN_JOURNAL_STACK,
+            post(routes::admin_journal_stack_add),
+        )
+        .route(
+            api_types::paths::ADMIN_JOURNAL_STACK_ORDER,
+            put(routes::admin_journal_stack_order),
+        )
+        .route(
+            api_types::paths::ADMIN_JOURNAL_STACK_ITEM,
+            put(routes::admin_journal_stack_edit).delete(routes::admin_journal_stack_delete),
+        )
+        .route(
+            api_types::paths::ADMIN_MESSAGES,
+            get(routes::admin_messages),
+        )
+        .route(
+            api_types::paths::ADMIN_MESSAGE_RESTORE,
+            post(routes::admin_message_restore),
+        )
+        .route(
+            api_types::paths::ADMIN_MESSAGE_REPORTS,
+            delete(routes::admin_message_dismiss),
+        )
         .fallback(error::not_found)
         .method_not_allowed_fallback(error::method_not_allowed)
         .with_state(config)
@@ -776,6 +819,139 @@ mod tests {
                     .to_str()
                     .unwrap();
                 assert!(!allowed.contains("authorization"), "{path}: {allowed}");
+            }
+        });
+    }
+    // ------------------------------------------ journal dan moderasi (D6b)
+
+    /// Path (dengan `{id}` diisi 1) dan metode yang diizinkan.
+    fn editor_paths() -> Vec<(String, Vec<Method>)> {
+        use api_types::paths as p;
+        let fill = |path: &str| path.replace("{id}", "1");
+        vec![
+            (fill(p::ADMIN_JOURNAL), vec![Method::GET]),
+            (fill(p::ADMIN_JOURNAL_PROFILE), vec![Method::PUT]),
+            (fill(p::ADMIN_JOURNAL_REPOS), vec![Method::POST]),
+            (fill(p::ADMIN_JOURNAL_REPOS_ORDER), vec![Method::PUT]),
+            (
+                fill(p::ADMIN_JOURNAL_REPO),
+                vec![Method::PUT, Method::DELETE],
+            ),
+            (fill(p::ADMIN_JOURNAL_STACK), vec![Method::POST]),
+            (fill(p::ADMIN_JOURNAL_STACK_ORDER), vec![Method::PUT]),
+            (
+                fill(p::ADMIN_JOURNAL_STACK_ITEM),
+                vec![Method::PUT, Method::DELETE],
+            ),
+            (fill(p::ADMIN_MESSAGES), vec![Method::GET]),
+            (fill(p::ADMIN_MESSAGE_RESTORE), vec![Method::POST]),
+            (fill(p::ADMIN_MESSAGE_REPORTS), vec![Method::DELETE]),
+        ]
+    }
+
+    #[test]
+    fn editor_endpoints_are_closed_without_the_right_token() {
+        futures_executor::block_on(async {
+            for cfg in [config(), with_admin()] {
+                for (path, methods) in editor_paths() {
+                    for method in &methods {
+                        for token in [None, Some("wrong"), Some("")] {
+                            let (status, _, json) =
+                                call_with(cfg.clone(), admin_req(method.clone(), &path, token))
+                                    .await;
+                            assert_eq!(
+                                status,
+                                StatusCode::UNAUTHORIZED,
+                                "{method} {path} {token:?}"
+                            );
+                            assert_eq!(json["error"]["code"], "unauthorized");
+                        }
+                    }
+                }
+            }
+            for (path, methods) in editor_paths() {
+                for method in methods {
+                    let (status, _, _) = call(admin_req(method.clone(), &path, Some(ADMIN))).await;
+                    assert_eq!(status, StatusCode::UNAUTHORIZED, "{method} {path}");
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn editor_endpoints_with_a_valid_token_need_the_database() {
+        futures_executor::block_on(async {
+            for (path, methods) in editor_paths() {
+                for method in methods {
+                    let (status, headers, json) =
+                        call_with(with_admin(), admin_req(method.clone(), &path, Some(ADMIN)))
+                            .await;
+                    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{method} {path}");
+                    assert_eq!(json["error"]["code"], "unavailable");
+                    assert_eq!(headers[header::CACHE_CONTROL], "no-store");
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn editor_endpoints_only_allow_their_own_methods() {
+        futures_executor::block_on(async {
+            for (path, allowed) in editor_paths() {
+                for method in [Method::GET, Method::POST, Method::PUT, Method::DELETE] {
+                    if allowed.contains(&method) {
+                        continue;
+                    }
+                    let (status, _, _) =
+                        call_with(with_admin(), admin_req(method.clone(), &path, Some(ADMIN)))
+                            .await;
+                    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{method} {path}");
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn the_order_routes_are_not_swallowed_by_the_id_routes() {
+        futures_executor::block_on(async {
+            // "order" harus sampai ke handler urutan (503 tanpa database), bukan
+            // ditolak sebagai id tidak valid (400) oleh rute `{id}`.
+            for path in [
+                api_types::paths::ADMIN_JOURNAL_REPOS_ORDER,
+                api_types::paths::ADMIN_JOURNAL_STACK_ORDER,
+            ] {
+                let (status, _, _) =
+                    call_with(with_admin(), admin_req(Method::PUT, path, Some(ADMIN))).await;
+                assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{path}");
+            }
+        });
+    }
+
+    #[test]
+    fn browsers_cannot_be_granted_editor_endpoints_through_cors() {
+        futures_executor::block_on(async {
+            for (path, methods) in editor_paths() {
+                for method in methods {
+                    let (status, headers, _) = call(
+                        req(Method::OPTIONS, &path)
+                            .header(header::ORIGIN, SITE)
+                            .header(header::ACCESS_CONTROL_REQUEST_METHOD, method.as_str())
+                            .header(header::ACCESS_CONTROL_REQUEST_HEADERS, "authorization")
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await;
+                    assert_eq!(status, StatusCode::NO_CONTENT);
+                    let allowed = headers[header::ACCESS_CONTROL_ALLOW_HEADERS]
+                        .to_str()
+                        .unwrap();
+                    assert!(!allowed.contains("authorization"), "{path}: {allowed}");
+                    let methods = headers[header::ACCESS_CONTROL_ALLOW_METHODS]
+                        .to_str()
+                        .unwrap();
+                    assert!(!methods.contains("PUT"), "{path}: {methods}");
+                    assert!(!methods.contains("DELETE"), "{path}: {methods}");
+                }
             }
         });
     }

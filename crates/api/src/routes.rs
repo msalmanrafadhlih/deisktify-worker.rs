@@ -13,7 +13,7 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use serde::Serialize;
+use serde::{de::DeserializeOwned, Serialize};
 
 use crate::{
     admin,
@@ -24,6 +24,8 @@ use crate::{
     error::AppError,
     github::GithubClient,
     journal::{self, JournalError},
+    journal_admin::{self, List, OrderBody, ProfileBody, RepoBody, StackBody},
+    moderation,
     panel::{self, Access, PanelError},
 };
 
@@ -338,6 +340,9 @@ pub fn panel_error(e: &PanelError) -> AppError {
             AppError::UNAVAILABLE
         }
         PanelError::Db(_) | PanelError::BadData(_) => AppError::INTERNAL,
+        PanelError::Invalid(why) => AppError::bad_request(why),
+        PanelError::NotFound => AppError::NOT_FOUND,
+        PanelError::Conflict => AppError::CONFLICT,
     }
 }
 
@@ -511,6 +516,298 @@ pub async fn admin_delete(
             worker::console_error!("admin delete: {e}");
             Ok(chat_error(&e))
         }
+    }
+}
+
+// ------------------------------------------- Journal dan moderasi (D6b)
+
+/// Isi JSON dari permintaan admin: tipe konten, batas ukuran, dan bentuk diperiksa
+/// dengan pesan tetap. Dipanggil SETELAH gerbang, jadi yang belum masuk tidak
+/// pernah sampai ke sini. `Origin` tidak diperiksa: dashboard satu origin dengan
+/// API dan yang membuka pintunya adalah token, bukan asal permintaan.
+fn admin_json<B: DeserializeOwned>(
+    headers: &HeaderMap,
+    body: Result<Bytes, BytesRejection>,
+) -> Result<B, AppError> {
+    if !is_json(
+        headers
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok()),
+    ) {
+        return Err(AppError::bad_request(
+            "Content-Type must be application/json.",
+        ));
+    }
+    let body = body.map_err(|e| {
+        if e.into_response().status() == StatusCode::PAYLOAD_TOO_LARGE {
+            AppError::PAYLOAD_TOO_LARGE
+        } else {
+            AppError::bad_request("Could not read the request body.")
+        }
+    })?;
+    serde_json::from_slice(&body)
+        .map_err(|_| AppError::bad_request("The request body is not valid."))
+}
+
+/// Jawaban galat untuk operasi admin; hanya kegagalan sungguhan yang masuk log
+/// (masukan salah, tidak ada, dan kembar adalah hal biasa).
+fn panel_fail(what: &str, e: &PanelError) -> Response {
+    if matches!(e, PanelError::Db(_) | PanelError::BadData(_)) {
+        worker::console_error!("{what}: {e}");
+    }
+    panel_error(e).into_response()
+}
+
+#[derive(Serialize)]
+struct Created {
+    id: u32,
+}
+
+#[derive(Serialize)]
+struct Username {
+    github_username: String,
+}
+
+fn no_content() -> Response {
+    StatusCode::NO_CONTENT.into_response()
+}
+
+/// `GET /api/v1/admin/journal`: akun, repo, stack, dan snapshot terbaru.
+#[worker::send]
+pub async fn admin_journal(
+    State(config): State<Arc<Config>>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let admin = gate!(&config, &headers, "admin journal");
+    match journal_admin::load(&admin.client, admin.now).await {
+        Ok(settings) => Ok(Json(settings).into_response()),
+        Err(e) => Ok(panel_fail("admin journal", &e)),
+    }
+}
+
+/// `PUT /api/v1/admin/journal/profile`: mengganti akun GitHub.
+#[worker::send]
+pub async fn admin_journal_profile(
+    State(config): State<Arc<Config>>,
+    headers: HeaderMap,
+    body: Result<Bytes, BytesRejection>,
+) -> Result<Response, AppError> {
+    let admin = gate!(&config, &headers, "admin journal profile");
+    let body: ProfileBody = admin_json(&headers, body)?;
+    match journal_admin::set_username(&admin.client, &body.github_username).await {
+        Ok(name) => {
+            audit(&admin, "journal.profile", Some(&format!("github:{name}"))).await;
+            Ok(Json(Username {
+                github_username: name,
+            })
+            .into_response())
+        }
+        Err(e) => Ok(panel_fail("admin journal profile", &e)),
+    }
+}
+
+/// `POST /api/v1/admin/journal/repos`: menambah repo sematan.
+#[worker::send]
+pub async fn admin_journal_repo_add(
+    State(config): State<Arc<Config>>,
+    headers: HeaderMap,
+    body: Result<Bytes, BytesRejection>,
+) -> Result<Response, AppError> {
+    let admin = gate!(&config, &headers, "admin repo add");
+    let body: RepoBody = admin_json(&headers, body)?;
+    match journal_admin::add_repo(&admin.client, &body).await {
+        Ok((id, name)) => {
+            audit(&admin, "journal.repo.add", Some(&format!("repo:{name}"))).await;
+            Ok((StatusCode::CREATED, Json(Created { id })).into_response())
+        }
+        Err(e) => Ok(panel_fail("admin repo add", &e)),
+    }
+}
+
+/// `PUT /api/v1/admin/journal/repos/{id}`: mengganti nama/topik repo.
+#[worker::send]
+pub async fn admin_journal_repo_edit(
+    State(config): State<Arc<Config>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    body: Result<Bytes, BytesRejection>,
+) -> Result<Response, AppError> {
+    let admin = gate!(&config, &headers, "admin repo edit");
+    let id = parse_id(&id)?;
+    let body: RepoBody = admin_json(&headers, body)?;
+    match journal_admin::edit_repo(&admin.client, id, &body).await {
+        Ok(name) => {
+            audit(&admin, "journal.repo.edit", Some(&format!("repo:{name}"))).await;
+            Ok(no_content())
+        }
+        Err(e) => Ok(panel_fail("admin repo edit", &e)),
+    }
+}
+
+/// `DELETE /api/v1/admin/journal/repos/{id}`.
+#[worker::send]
+pub async fn admin_journal_repo_delete(
+    State(config): State<Arc<Config>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let admin = gate!(&config, &headers, "admin repo delete");
+    let id = parse_id(&id)?;
+    match journal_admin::delete_repo(&admin.client, id).await {
+        Ok(name) => {
+            audit(&admin, "journal.repo.delete", Some(&format!("repo:{name}"))).await;
+            Ok(no_content())
+        }
+        Err(e) => Ok(panel_fail("admin repo delete", &e)),
+    }
+}
+
+/// `PUT /api/v1/admin/journal/repos/order`.
+#[worker::send]
+pub async fn admin_journal_repos_order(
+    State(config): State<Arc<Config>>,
+    headers: HeaderMap,
+    body: Result<Bytes, BytesRejection>,
+) -> Result<Response, AppError> {
+    let admin = gate!(&config, &headers, "admin repo order");
+    let body: OrderBody = admin_json(&headers, body)?;
+    match journal_admin::reorder(&admin.client, List::Repos, &body.ids).await {
+        Ok(()) => {
+            audit(&admin, "journal.repo.order", None).await;
+            Ok(no_content())
+        }
+        Err(e) => Ok(panel_fail("admin repo order", &e)),
+    }
+}
+
+/// `POST /api/v1/admin/journal/stack`.
+#[worker::send]
+pub async fn admin_journal_stack_add(
+    State(config): State<Arc<Config>>,
+    headers: HeaderMap,
+    body: Result<Bytes, BytesRejection>,
+) -> Result<Response, AppError> {
+    let admin = gate!(&config, &headers, "admin stack add");
+    let body: StackBody = admin_json(&headers, body)?;
+    match journal_admin::add_stack(&admin.client, &body).await {
+        Ok((id, name)) => {
+            audit(&admin, "journal.stack.add", Some(&format!("stack:{name}"))).await;
+            Ok((StatusCode::CREATED, Json(Created { id })).into_response())
+        }
+        Err(e) => Ok(panel_fail("admin stack add", &e)),
+    }
+}
+
+/// `PUT /api/v1/admin/journal/stack/{id}`.
+#[worker::send]
+pub async fn admin_journal_stack_edit(
+    State(config): State<Arc<Config>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    body: Result<Bytes, BytesRejection>,
+) -> Result<Response, AppError> {
+    let admin = gate!(&config, &headers, "admin stack edit");
+    let id = parse_id(&id)?;
+    let body: StackBody = admin_json(&headers, body)?;
+    match journal_admin::edit_stack(&admin.client, id, &body).await {
+        Ok(name) => {
+            audit(&admin, "journal.stack.edit", Some(&format!("stack:{name}"))).await;
+            Ok(no_content())
+        }
+        Err(e) => Ok(panel_fail("admin stack edit", &e)),
+    }
+}
+
+/// `DELETE /api/v1/admin/journal/stack/{id}`.
+#[worker::send]
+pub async fn admin_journal_stack_delete(
+    State(config): State<Arc<Config>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let admin = gate!(&config, &headers, "admin stack delete");
+    let id = parse_id(&id)?;
+    match journal_admin::delete_stack(&admin.client, id).await {
+        Ok(name) => {
+            audit(
+                &admin,
+                "journal.stack.delete",
+                Some(&format!("stack:{name}")),
+            )
+            .await;
+            Ok(no_content())
+        }
+        Err(e) => Ok(panel_fail("admin stack delete", &e)),
+    }
+}
+
+/// `PUT /api/v1/admin/journal/stack/order`.
+#[worker::send]
+pub async fn admin_journal_stack_order(
+    State(config): State<Arc<Config>>,
+    headers: HeaderMap,
+    body: Result<Bytes, BytesRejection>,
+) -> Result<Response, AppError> {
+    let admin = gate!(&config, &headers, "admin stack order");
+    let body: OrderBody = admin_json(&headers, body)?;
+    match journal_admin::reorder(&admin.client, List::Stack, &body.ids).await {
+        Ok(()) => {
+            audit(&admin, "journal.stack.order", None).await;
+            Ok(no_content())
+        }
+        Err(e) => Ok(panel_fail("admin stack order", &e)),
+    }
+}
+
+/// `GET /api/v1/admin/messages?filter=&before=&limit=`: entri untuk moderator.
+#[worker::send]
+pub async fn admin_messages(
+    State(config): State<Arc<Config>>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let admin = gate!(&config, &headers, "admin messages");
+    let q = moderation::parse_query(query.as_deref())
+        .ok_or(AppError::bad_request("Invalid query parameters."))?;
+    match moderation::list(&admin.client, &q).await {
+        Ok(items) => Ok(Json(Items { items }).into_response()),
+        Err(e) => Ok(panel_fail("admin messages", &e)),
+    }
+}
+
+/// `POST /api/v1/admin/messages/{id}/restore`: menampilkan lagi entri.
+#[worker::send]
+pub async fn admin_message_restore(
+    State(config): State<Arc<Config>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let admin = gate!(&config, &headers, "admin restore");
+    let id = parse_id(&id)?;
+    match moderation::restore(&admin.client, id).await {
+        Ok(()) => {
+            audit(&admin, "message.restore", Some(&format!("message:{id}"))).await;
+            Ok(no_content())
+        }
+        Err(e) => Ok(panel_fail("admin restore", &e)),
+    }
+}
+
+/// `DELETE /api/v1/admin/messages/{id}/reports`: menolak semua laporan entri.
+#[worker::send]
+pub async fn admin_message_dismiss(
+    State(config): State<Arc<Config>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let admin = gate!(&config, &headers, "admin dismiss");
+    let id = parse_id(&id)?;
+    match moderation::dismiss_reports(&admin.client, id).await {
+        Ok(()) => {
+            audit(&admin, "message.dismiss", Some(&format!("message:{id}"))).await;
+            Ok(no_content())
+        }
+        Err(e) => Ok(panel_fail("admin dismiss", &e)),
     }
 }
 

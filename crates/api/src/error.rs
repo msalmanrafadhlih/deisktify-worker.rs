@@ -69,6 +69,12 @@ impl AppError {
         code: ErrorCode::Unavailable,
         message: "Could not reach GitHub.",
     };
+    /// Admin: nilai itu sudah ada (nama repo atau stack kembar).
+    pub const CONFLICT: Self = Self {
+        status: StatusCode::CONFLICT,
+        code: ErrorCode::BadRequest,
+        message: "That already exists.",
+    };
     pub const INTERNAL: Self = Self {
         status: StatusCode::INTERNAL_SERVER_ERROR,
         code: ErrorCode::Internal,

@@ -91,7 +91,11 @@ test("labels cover every table the server reports and fall back to the raw name"
   assert.equal(logic.actionLabel("login"), "Masuk");
   assert.equal(logic.actionLabel("something.new"), "something.new");
   assert.equal(logic.targetLabel("message:12"), "Entri #12");
-  assert.equal(logic.targetLabel("message:x"), "message:x");
+  assert.equal(logic.targetLabel("message:x"), "Entri #x");
+  assert.equal(logic.targetLabel("repo:flexinix"), "Repo flexinix");
+  assert.equal(logic.targetLabel("stack:Rust"), "Stack Rust");
+  assert.equal(logic.targetLabel("github:moch"), "Akun moch");
+  assert.equal(logic.targetLabel("table:x"), "table:x");
   assert.equal(logic.targetLabel(null), "");
   assert.equal(logic.whoLabel("abc", "abc"), "Perangkat ini");
   assert.equal(logic.whoLabel("abc", "xyz"), "Lainnya (abc)");
@@ -221,7 +225,7 @@ test("an empty token never reaches the network", async () => {
 
 // ------------------------------------------------------------------ statis
 
-const jsFiles = ["app.js", "api.js", "logic.js"];
+const jsFiles = ["app.js", "api.js", "logic.js", "parts.js", "journal.js", "guestbook.js"];
 
 test("the page has no inline script or style and loads one module from its own folder", () => {
   const html = read(admin, "index.html");
@@ -286,6 +290,23 @@ test("client paths match the Rust contract", () => {
   assert.equal(PATHS.login, path("ADMIN_LOGIN"));
   assert.equal(PATHS.overview, path("ADMIN_OVERVIEW"));
   assert.equal(PATHS.audit, path("ADMIN_AUDIT"));
+  const pairs = {
+    journal: "ADMIN_JOURNAL",
+    journalRefresh: "ADMIN_JOURNAL_REFRESH",
+    journalProfile: "ADMIN_JOURNAL_PROFILE",
+    journalRepos: "ADMIN_JOURNAL_REPOS",
+    journalReposOrder: "ADMIN_JOURNAL_REPOS_ORDER",
+    journalRepo: "ADMIN_JOURNAL_REPO",
+    journalStack: "ADMIN_JOURNAL_STACK",
+    journalStackOrder: "ADMIN_JOURNAL_STACK_ORDER",
+    journalStackItem: "ADMIN_JOURNAL_STACK_ITEM",
+    messages: "ADMIN_MESSAGES",
+    message: "ADMIN_MESSAGE",
+    messageRestore: "ADMIN_MESSAGE_RESTORE",
+    messageReports: "ADMIN_MESSAGE_REPORTS",
+  };
+  for (const [key, rustName] of Object.entries(pairs)) assert.equal(PATHS[key], path(rustName), key);
+  assert.deepEqual(Object.keys(PATHS).sort(), [...Object.keys(pairs), "login", "overview", "audit"].sort(), "every client path is checked");
 });
 
 test("wrangler serves the web folder, which holds the admin page", () => {
@@ -297,4 +318,179 @@ test("wrangler serves the web folder, which holds the admin page", () => {
   assert.ok(existsSync(join(resolved, "admin", "index.html")));
   assert.ok(existsSync(join(resolved, "_headers")));
   assert.doesNotMatch(toml, /run_worker_first/, "assets are matched first; only unmatched paths reach the Worker");
+});
+
+// -------------------------------------------------------------- D6b: logika
+
+test("every audit action the server writes has a readable label", () => {
+  const src = read(root, "crates/api/src/routes.rs");
+  const actions = [...src.matchAll(/audit\(&admin, "([a-z.]+)"/g)].map((m) => m[1]);
+  assert.ok(actions.length >= 12, `found ${actions.length}`);
+  for (const a of actions) assert.notEqual(logic.actionLabel(a), a, `${a} has no label`);
+  assert.ok(actions.every((a) => a.length <= 40), "fits the audit column");
+});
+
+test("new error statuses have their own Indonesian message", () => {
+  for (const s of [404, 409, 413]) assert.doesNotMatch(logic.describeError({ status: s }), /kesalahan di server/, String(s));
+  assert.match(logic.describeError({ status: 409 }), /sudah ada/);
+  assert.match(logic.describeError({ status: 404 }), /tidak ditemukan/);
+});
+
+test("form checks mirror the server rules and give a reason", () => {
+  assert.equal(logic.validateUsername("moch-1"), "");
+  for (const bad of ["", "  ", "a b", "a_b", "x".repeat(40), "é"]) assert.notEqual(logic.validateUsername(bad), "", JSON.stringify(bad));
+  assert.equal(logic.validateRepo("flex.inix_1-a", "Nix flakes"), "");
+  assert.equal(logic.validateRepo("a", ""), "");
+  for (const bad of ["", " ", "a b", "a/b", "é", "x".repeat(101)]) assert.notEqual(logic.validateRepo(bad, ""), "", JSON.stringify(bad));
+  assert.notEqual(logic.validateRepo("a", "t".repeat(61)), "");
+  assert.equal(logic.validateRepo("a", "t".repeat(60)), "");
+  assert.equal(logic.validateStack("Rust  lang"), "");
+  for (const bad of ["", " \n ", "n".repeat(41)]) assert.notEqual(logic.validateStack(bad), "", JSON.stringify(bad));
+  assert.equal(logic.squash("  a \n b\t c "), "a b c");
+});
+
+test("moving an item swaps neighbours and refuses to leave the list", () => {
+  assert.deepEqual(logic.moveId([1, 2, 3], 1, -1), [2, 1, 3]);
+  assert.deepEqual(logic.moveId([1, 2, 3], 1, 1), [1, 3, 2]);
+  assert.equal(logic.moveId([1, 2, 3], 0, -1), null);
+  assert.equal(logic.moveId([1, 2, 3], 2, 1), null);
+  assert.equal(logic.moveId([1, 2, 3], 5, 1), null);
+  assert.equal(logic.moveId([], 0, 1), null);
+  const original = [1, 2, 3];
+  logic.moveId(original, 0, 1);
+  assert.deepEqual(original, [1, 2, 3], "the input is not mutated");
+});
+
+const goodJournal = () => ({
+  now: "2026-10-22T12:00:00Z",
+  github_username: "moch",
+  repos: [{ id: 2, repo_name: "flexinix", topic: "Nix" }, { id: 3, repo_name: "dots", topic: null }],
+  stack: [{ id: 1, name: "Rust" }],
+  snapshots: [{ id: 9, fetched_at: "2026-10-22T06:00:00Z", source: "github" }],
+  caps: { max_pinned: 12, max_stack: 12 },
+});
+
+test("journal settings are checked and renamed for the screen", () => {
+  const j = logic.normalizeJournal(goodJournal());
+  assert.equal(j.username, "moch");
+  assert.deepEqual(j.repos[1], { id: 3, name: "dots", topic: null });
+  assert.equal(j.snapshots[0].fetchedAt, "2026-10-22T06:00:00Z");
+  assert.deepEqual(j.caps, { maxPinned: 12, maxStack: 12 });
+  const broken = [
+    null, [], {}, { ...goodJournal(), caps: null }, { ...goodJournal(), repos: "x" },
+    { ...goodJournal(), repos: [{ id: 0, repo_name: "a", topic: null }] },
+    { ...goodJournal(), repos: [{ id: 1, repo_name: 5, topic: null }] },
+    { ...goodJournal(), stack: [{ id: 1 }] },
+    { ...goodJournal(), snapshots: [{ id: 1, fetched_at: "x" }] },
+    { ...goodJournal(), now: 5 },
+    { ...goodJournal(), github_username: null },
+    { ...goodJournal(), caps: { max_pinned: -1, max_stack: 1 } },
+  ];
+  for (const b of broken) assert.equal(logic.normalizeJournal(b), null, JSON.stringify(b));
+});
+
+test("guestbook entries are checked row by row and keep their text untouched", () => {
+  const row = (extra = {}) => ({
+    id: 5, username: "ani", url: null, message: "<img src=x onerror=alert(1)> **hi**", created_at: "2026-01-01T00:00:00Z",
+    hidden_at: null, reports: 2, last_reported_at: "2026-01-02T00:00:00Z", ...extra,
+  });
+  const out = logic.normalizeMessages({ items: [row(), row({ id: 6, hidden_at: "2026-02-01T00:00:00Z", url: "https://a.example", reports: 0, last_reported_at: null })] });
+  assert.equal(out[0].message, "<img src=x onerror=alert(1)> **hi**", "never sanitised into something else; it is rendered as text");
+  assert.equal(out[1].hiddenAt, "2026-02-01T00:00:00Z");
+  assert.equal(out[1].url, "https://a.example");
+  assert.deepEqual(logic.normalizeMessages({ items: [] }), []);
+  for (const bad of [null, {}, { items: "x" }, { items: [row({ id: -1 })] }, { items: [row({ message: 1 })] }, { items: [row({ reports: "2" })] }, { items: [null] }]) {
+    assert.equal(logic.normalizeMessages(bad), null, JSON.stringify(bad));
+  }
+  assert.deepEqual(logic.MESSAGE_FILTERS.map((f) => f.id), ["reported", "hidden", "all"]);
+});
+
+// ----------------------------------------------------------- D6b: klien API
+
+async function signedIn(handler) {
+  const f = fakeFetch(handler);
+  const api = createApi(f);
+  await api.login("tok-123");
+  f.calls.length = 0;
+  return { api, f };
+}
+
+test("journal calls use the right method, path, JSON body and no-content handling", async () => {
+  const { api, f } = await signedIn((url, init) => (init.method === "POST" && url.endsWith("/repos") ? reply(201, { id: 7 }) : init.method === "GET" ? reply(200, goodJournal()) : reply(204, null)));
+  await api.journal();
+  assert.equal(await api.setUsername("moch"), null);
+  assert.deepEqual((await api.addRepo("flexinix", "Nix")), { id: 7 });
+  await api.addRepo("plain", "");
+  await api.editRepo(2, "flexinix", "Topic");
+  await api.deleteRepo(2);
+  await api.orderRepos([3, 2]);
+  await api.addStack("Zig");
+  await api.editStack(1, "Rust");
+  await api.deleteStack(1);
+  await api.orderStack([1]);
+  await api.journalRefresh();
+  const seen = f.calls.map((c) => `${c.init.method} ${c.url}`);
+  assert.deepEqual(seen, [
+    "GET /api/v1/admin/journal",
+    "PUT /api/v1/admin/journal/profile",
+    "POST /api/v1/admin/journal/repos",
+    "POST /api/v1/admin/journal/repos",
+    "PUT /api/v1/admin/journal/repos/2",
+    "DELETE /api/v1/admin/journal/repos/2",
+    "PUT /api/v1/admin/journal/repos/order",
+    "POST /api/v1/admin/journal/stack",
+    "PUT /api/v1/admin/journal/stack/1",
+    "DELETE /api/v1/admin/journal/stack/1",
+    "PUT /api/v1/admin/journal/stack/order",
+    "POST /api/v1/admin/journal/refresh",
+  ]);
+  const body = (i) => JSON.parse(f.calls[i].init.body);
+  assert.deepEqual(body(1), { github_username: "moch" });
+  assert.deepEqual(body(2), { repo_name: "flexinix", topic: "Nix" });
+  assert.deepEqual(body(3), { repo_name: "plain", topic: null }, "an empty topic is sent as null");
+  assert.deepEqual(body(6), { ids: [3, 2] });
+  for (const i of [1, 2, 4, 6, 7, 8, 10]) assert.equal(f.calls[i].init.headers["content-type"], "application/json");
+  for (const i of [0, 5, 9, 11]) assert.equal(f.calls[i].init.body, undefined, "no body on " + seen[i]);
+  for (const c of f.calls) {
+    assert.equal(c.init.headers.authorization, "Bearer tok-123");
+    assert.ok(!c.url.includes("tok-123"));
+  }
+});
+
+test("guestbook calls carry the filter and cursor in the query and the id in the path", async () => {
+  const { api, f } = await signedIn((url, init) => (init.method === "GET" ? reply(200, { items: [] }) : reply(204, null)));
+  await api.messages("reported", null, 30);
+  await api.messages("all", 41, 30);
+  await api.hideMessage(5);
+  await api.restoreMessage(5);
+  await api.dismissReports(5);
+  assert.deepEqual(f.calls.map((c) => `${c.init.method} ${c.url}`), [
+    "GET /api/v1/admin/messages?filter=reported&limit=30",
+    "GET /api/v1/admin/messages?filter=all&limit=30&before=41",
+    "DELETE /api/v1/admin/messages/5",
+    "POST /api/v1/admin/messages/5/restore",
+    "DELETE /api/v1/admin/messages/5/reports",
+  ]);
+});
+
+test("an id that is not a positive integer never reaches the network", async () => {
+  const { api, f } = await signedIn(() => reply(204, null));
+  for (const bad of [0, -1, 1.5, NaN, "5", "../admin", null, undefined, 2 ** 60]) {
+    await assert.rejects(() => api.deleteRepo(bad), (e) => e instanceof ApiError && e.status === 400, String(bad));
+    await assert.rejects(() => api.hideMessage(bad), (e) => e.status === 400);
+  }
+  assert.equal(f.calls.length, 0);
+});
+
+test("a 429 from refresh keeps its wait time and a 409 is reported as such", async () => {
+  const { api } = await signedIn((url) => (url.endsWith("login") ? reply(200, goodOverview()) : url.endsWith("refresh") ? reply(429, {}, { "retry-after": "41" }) : reply(409, {})));
+  await assert.rejects(() => api.journalRefresh(), (e) => e.status === 429 && e.retryAfter === 41);
+  await assert.rejects(() => api.addStack("Rust"), (e) => e.status === 409);
+});
+
+test("the new screens only render server text as text", () => {
+  for (const name of ["journal.js", "guestbook.js", "parts.js"]) {
+    const src = read(admin, name);
+    assert.doesNotMatch(src, /href=|src=\$\{|target=/, `${name} must not build links or images from data`);
+  }
 });

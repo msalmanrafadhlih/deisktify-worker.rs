@@ -55,6 +55,12 @@ pub enum PanelError {
     Db(Error),
     /// Respons database tidak berbentuk yang diharapkan.
     BadData(&'static str),
+    /// Masukan admin ditolak (pesan tetap, tidak memuat masukannya).
+    Invalid(&'static str),
+    /// Baris yang dituju tidak ada.
+    NotFound,
+    /// Nilai itu sudah ada (batas UNIQUE).
+    Conflict,
 }
 
 impl std::fmt::Display for PanelError {
@@ -62,6 +68,9 @@ impl std::fmt::Display for PanelError {
         match self {
             PanelError::Db(e) => write!(f, "{e}"),
             PanelError::BadData(what) => write!(f, "unexpected data: {what}"),
+            PanelError::Invalid(why) => write!(f, "invalid input: {why}"),
+            PanelError::NotFound => f.write_str("not found"),
+            PanelError::Conflict => f.write_str("already exists"),
         }
     }
 }

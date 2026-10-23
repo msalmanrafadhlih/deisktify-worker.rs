@@ -122,3 +122,26 @@ pub fn tx_reply(stmts: Vec<Json>) -> Result<HttpResponse, String> {
         {"type": "ok", "response": {"type": "close"}}
     ]}))
 }
+
+/// `client.execute` yang gagal di server (mis. pelanggaran constraint).
+pub fn execute_error(message: &str) -> Result<HttpResponse, String> {
+    ok(json!({"results": [
+        {"type": "error", "error": {"message": message, "code": "SQLITE_CONSTRAINT"}},
+        {"type": "ok", "response": {"type": "close"}}
+    ]}))
+}
+
+/// `client.transaction` dengan `n` statement yang gagal pada statement ke-`index`.
+pub fn tx_step_error(n: usize, index: usize, message: &str) -> Result<HttpResponse, String> {
+    let mut steps = vec![json!(null); n + 3];
+    steps[0] = result(&[], &[]);
+    let mut errors = vec![json!(null); n + 3];
+    errors[index + 1] = json!({"message": message, "code": "SQLITE_CONSTRAINT"});
+    ok(json!({"results": [
+        {"type": "ok", "response": {"type": "batch", "result": {
+            "step_results": steps,
+            "step_errors": errors
+        }}},
+        {"type": "ok", "response": {"type": "close"}}
+    ]}))
+}

@@ -544,3 +544,168 @@ test("admin queries use bound parameters and an explicit order where they list r
     assert.match(sql, /\?\d/, `${name} must take its values as parameters`);
   }
 });
+
+// ---- D6b: editor Journal dan moderasi Guestbook
+
+const rows = (db, name, ...args) => db.prepare(sqlOf(name)).all(...args).map((r) => ({ ...r }));
+const names = (db, table) => db.prepare(`SELECT name FROM ${table} ORDER BY position, id`).all().map((r) => r.name);
+
+test("journal editor: the account is upserted and the CHECK still guards the alphabet", () => {
+  const db = seededDb();
+  assert.equal(rows(db, "admin_journal_profile_set", "moch")[0].github_username, "moch");
+  assert.equal(count(db, "journal_profile"), 1);
+  assert.throws(() => db.prepare(sqlOf("admin_journal_profile_set")).run("bad name"));
+  db.exec("DELETE FROM journal_profile");
+  assert.equal(rows(db, "admin_journal_profile_set", "again")[0].github_username, "again", "also works when the row is missing");
+  assert.equal(count(db, "journal_profile"), 1);
+});
+
+test("journal editor: new repos go last, the cap is enforced in SQL, duplicates are refused", () => {
+  const db = seededDb();
+  const insert = (name, topic = null, cap = 12) => rows(db, "admin_journal_repo_insert", name, topic, cap);
+  const before = count(db, "journal_pinned_repos");
+  const [a] = insert("new-one", "Topic");
+  assert.ok(a.id);
+  assert.equal(rows(db, "admin_journal_repos").at(-1).repo_name, "new-one");
+  assert.equal(rows(db, "admin_journal_repos").at(-1).topic, "Topic");
+  assert.throws(() => insert("new-one"), /UNIQUE constraint failed/);
+  assert.equal(count(db, "journal_pinned_repos"), before + 1);
+  // Penuh: tidak ada baris yang dimasukkan (dan bukan galat).
+  while (count(db, "journal_pinned_repos") < 12) insert(`fill-${count(db, "journal_pinned_repos")}`);
+  assert.deepEqual(insert("one-too-many"), []);
+  assert.equal(count(db, "journal_pinned_repos"), 12);
+  // Daftar kosong: posisi pertama = 1.
+  db.exec("DELETE FROM journal_pinned_repos");
+  insert("first");
+  assert.equal(db.prepare("SELECT position FROM journal_pinned_repos").get().position, 1);
+});
+
+test("journal editor: edit and delete report whether a row was touched", () => {
+  const db = seededDb();
+  const first = rows(db, "admin_journal_repos")[0];
+  assert.equal(rows(db, "admin_journal_repo_update", first.id, "renamed", null)[0].repo_name, "renamed");
+  assert.equal(rows(db, "admin_journal_repos")[0].topic, null, "topic can be cleared");
+  assert.deepEqual(rows(db, "admin_journal_repo_update", 99999, "x", null), []);
+  const second = rows(db, "admin_journal_repos")[1];
+  assert.throws(() => rows(db, "admin_journal_repo_update", second.id, "renamed", null), /UNIQUE constraint failed/);
+  assert.equal(rows(db, "admin_journal_repo_delete", first.id)[0].repo_name, "renamed");
+  assert.deepEqual(rows(db, "admin_journal_repo_delete", first.id), []);
+  assert.throws(() => rows(db, "admin_journal_repo_update", second.id, "bad name", null), /CHECK constraint failed/);
+});
+
+test("journal editor: stack add, edit, delete, cap and duplicates behave the same way", () => {
+  const db = seededDb();
+  const ins = (n, cap = 12) => rows(db, "admin_journal_stack_insert", n, cap);
+  assert.ok(ins("Zig")[0].id);
+  assert.equal(names(db, "journal_stack").at(-1), "Zig");
+  assert.throws(() => ins("Zig"), /UNIQUE constraint failed/);
+  while (count(db, "journal_stack") < 12) ins(`s${count(db, "journal_stack")}`);
+  assert.deepEqual(ins("extra"), []);
+  const id = rows(db, "admin_journal_stack")[0].id;
+  assert.equal(rows(db, "admin_journal_stack_update", id, "Changed")[0].name, "Changed");
+  assert.deepEqual(rows(db, "admin_journal_stack_update", 99999, "x"), []);
+  assert.equal(rows(db, "admin_journal_stack_delete", id)[0].name, "Changed");
+  assert.deepEqual(rows(db, "admin_journal_stack_delete", id), []);
+});
+
+test("journal editor: positions written one by one reorder the list (list queries sort by position, id)", () => {
+  const db = seededDb();
+  const ids = rows(db, "admin_journal_repo_ids").map((r) => r.id);
+  const wanted = [...ids].reverse();
+  wanted.forEach((id, i) => db.prepare(sqlOf("admin_journal_repo_position")).run(i + 1, id));
+  assert.deepEqual(rows(db, "admin_journal_repo_ids").map((r) => r.id), wanted);
+  assert.deepEqual(rows(db, "admin_journal_repos").map((r) => r.id), wanted);
+
+  const sids = rows(db, "admin_journal_stack_ids").map((r) => r.id);
+  const swapped = [sids[1], sids[0], ...sids.slice(2)];
+  swapped.forEach((id, i) => db.prepare(sqlOf("admin_journal_stack_position")).run(i + 1, id));
+  assert.deepEqual(rows(db, "admin_journal_stack_ids").map((r) => r.id), swapped);
+});
+
+test("journal editor: snapshots list newest first and respects the limit", () => {
+  const db = freshDb();
+  db.exec("DELETE FROM journal_snapshots");
+  for (const [at, src] of [
+    ["2026-01-01T00:00:00Z", "seed"],
+    ["2026-01-03T00:00:00Z", "github"],
+    ["2026-01-02T00:00:00Z", "github"],
+  ]) {
+    insertSnapshot(db, at, src);
+  }
+  const list = rows(db, "admin_journal_snapshots", 2);
+  assert.deepEqual(list.map((r) => r.fetched_at), ["2026-01-03T00:00:00Z", "2026-01-02T00:00:00Z"]);
+  assert.deepEqual(Object.keys(list[0]).sort(), ["fetched_at", "id", "source"], "the payload is never listed");
+});
+
+function moderationDb() {
+  const db = freshDb();
+  db.exec("DELETE FROM chat_messages");
+  const add = (user, msg, at, url = null) => insertMsg(db, user, msg, at, url);
+  for (let i = 1; i <= 6; i++) add(`u${i}`, `message ${i}`, `2026-02-0${i}T00:00:00Z`);
+  const id = (u) => db.prepare("SELECT id FROM chat_messages WHERE username = ?").get(u).id;
+  const report = db.prepare("INSERT INTO message_reports (message_id, reporter, created_at) VALUES (?, ?, ?)");
+  report.run(id("u2"), "r1", "2026-03-01T00:00:00Z");
+  report.run(id("u2"), "r2", "2026-03-02T00:00:00Z");
+  report.run(id("u4"), "r1", "2026-03-03T00:00:00Z");
+  report.run(id("u5"), "r1", "2026-03-04T00:00:00Z");
+  db.prepare("UPDATE chat_messages SET deleted_at = '2026-03-05T00:00:00Z' WHERE id = ?").run(id("u5"));
+  db.prepare("UPDATE chat_messages SET deleted_at = '2026-03-06T00:00:00Z' WHERE id = ?").run(id("u6"));
+  return { db, id };
+}
+
+test("moderation list: filters, counts, newest first, and cursor paging", () => {
+  const { db, id } = moderationDb();
+  const list = (before, filter, limit = 50) => rows(db, "admin_messages_list", before, filter, limit);
+  assert.deepEqual(list(null, "reported").map((r) => r.id), [id("u4"), id("u2")], "visible entries with reports only");
+  assert.deepEqual(list(null, "hidden").map((r) => r.id), [id("u6"), id("u5")]);
+  assert.equal(list(null, "all").length, 6);
+  assert.deepEqual(list(null, "anything-else").length, 6, "an unknown filter behaves like all (the API only sends the three)");
+  const u2 = list(null, "reported").find((r) => r.id === id("u2"));
+  assert.equal(u2.reports, 2);
+  assert.equal(u2.last_reported_at, "2026-03-02T00:00:00Z");
+  const plain = list(null, "all").find((r) => r.id === id("u1"));
+  assert.equal(plain.reports, 0);
+  assert.equal(plain.last_reported_at, null);
+  assert.equal(plain.deleted_at, null);
+  assert.equal(list(null, "all").find((r) => r.id === id("u5")).deleted_at, "2026-03-05T00:00:00Z");
+  // Halaman demi halaman tanpa duplikat.
+  const seen = [];
+  let cursor = null;
+  for (;;) {
+    const page = list(cursor, "all", 4);
+    if (!page.length) break;
+    seen.push(...page.map((r) => r.id));
+    cursor = page.at(-1).id;
+  }
+  assert.equal(seen.length, 6);
+  assert.equal(new Set(seen).size, 6);
+  assert.deepEqual(seen, [...seen].sort((a, b) => b - a));
+});
+
+test("moderation: restore only touches hidden entries, dismiss only removes reports", () => {
+  const { db, id } = moderationDb();
+  assert.equal(rows(db, "admin_message_restore", id("u5")).length, 1);
+  assert.deepEqual(rows(db, "admin_message_restore", id("u5")), [], "already visible");
+  assert.deepEqual(rows(db, "admin_message_restore", 99999), []);
+  assert.equal(db.prepare("SELECT deleted_at FROM chat_messages WHERE id = ?").get(id("u5")).deleted_at, null);
+  // u5 punya satu laporan lama; setelah dipulihkan ia kembali muncul di "reported".
+  assert.ok(rows(db, "admin_messages_list", null, "reported", 50).some((r) => r.id === id("u5")));
+
+  assert.equal(rows(db, "admin_reports_dismiss", id("u2")).length, 2, "one row per removed report");
+  assert.deepEqual(rows(db, "admin_reports_dismiss", id("u2")), []);
+  assert.equal(count(db, "chat_messages"), 6, "dismissing never removes the entry");
+  assert.ok(!rows(db, "admin_messages_list", null, "reported", 50).some((r) => r.id === id("u2")));
+});
+
+test("D6b queries use bound parameters", () => {
+  for (const name of [
+    "admin_journal_profile_set", "admin_journal_repo_insert", "admin_journal_repo_update", "admin_journal_repo_delete",
+    "admin_journal_repo_position", "admin_journal_stack_insert", "admin_journal_stack_update", "admin_journal_stack_delete",
+    "admin_journal_stack_position", "admin_journal_snapshots", "admin_messages_list", "admin_message_restore", "admin_reports_dismiss",
+  ]) {
+    assert.match(sqlOf(name), /\?\d/, `${name} must take its values as parameters`);
+  }
+  for (const name of ["admin_journal_snapshots", "admin_messages_list", "admin_journal_repos", "admin_journal_stack"]) {
+    assert.match(sqlOf(name), /ORDER BY/, `${name} needs an explicit order`);
+  }
+});

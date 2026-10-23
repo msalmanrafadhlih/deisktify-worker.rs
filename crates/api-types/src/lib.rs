@@ -61,6 +61,32 @@ pub mod paths {
     /// `GET`: riwayat aksi admin, terbaru dulu (`?before=<id>`, `&limit=<n>`).
     pub const ADMIN_AUDIT: &str = "/api/v1/admin/audit";
 
+    // ---- D6b: journal
+    /// `GET`: pengaturan jurnal (akun, repo sematan, stack) dan daftar snapshot.
+    pub const ADMIN_JOURNAL: &str = "/api/v1/admin/journal";
+    /// `PUT`: ganti akun GitHub (`{"github_username"}`).
+    pub const ADMIN_JOURNAL_PROFILE: &str = "/api/v1/admin/journal/profile";
+    /// `POST`: tambah repo sematan (`{"repo_name","topic"?}`) → `201 {"id"}`.
+    pub const ADMIN_JOURNAL_REPOS: &str = "/api/v1/admin/journal/repos";
+    /// `PUT`: urutan repo (`{"ids":[...]}`, harus memuat semua id tepat sekali).
+    pub const ADMIN_JOURNAL_REPOS_ORDER: &str = "/api/v1/admin/journal/repos/order";
+    /// `PUT` ganti (`{"repo_name","topic"?}`), `DELETE` hapus. Templat rute Axum.
+    pub const ADMIN_JOURNAL_REPO: &str = "/api/v1/admin/journal/repos/{id}";
+    /// `POST`: tambah item stack (`{"name"}`) → `201 {"id"}`.
+    pub const ADMIN_JOURNAL_STACK: &str = "/api/v1/admin/journal/stack";
+    /// `PUT`: urutan stack (`{"ids":[...]}`).
+    pub const ADMIN_JOURNAL_STACK_ORDER: &str = "/api/v1/admin/journal/stack/order";
+    /// `PUT` ganti (`{"name"}`), `DELETE` hapus. Templat rute Axum.
+    pub const ADMIN_JOURNAL_STACK_ITEM: &str = "/api/v1/admin/journal/stack/{id}";
+
+    // ---- D6b: moderasi Guestbook
+    /// `GET`: entri untuk moderator (`?filter=reported|hidden|all&before=<id>&limit=<n>`).
+    pub const ADMIN_MESSAGES: &str = "/api/v1/admin/messages";
+    /// `POST`: tampilkan lagi entri yang disembunyikan. Templat rute Axum.
+    pub const ADMIN_MESSAGE_RESTORE: &str = "/api/v1/admin/messages/{id}/restore";
+    /// `DELETE`: tolak (hapus) semua laporan sebuah entri. Templat rute Axum.
+    pub const ADMIN_MESSAGE_REPORTS: &str = "/api/v1/admin/messages/{id}/reports";
+
     /// Semua path; tambahkan endpoint baru di sini juga supaya test prefix mencakupnya.
     pub const ALL: &[&str] = &[
         HEALTH,
@@ -78,6 +104,17 @@ pub mod paths {
         ADMIN_LOGIN,
         ADMIN_OVERVIEW,
         ADMIN_AUDIT,
+        ADMIN_JOURNAL,
+        ADMIN_JOURNAL_PROFILE,
+        ADMIN_JOURNAL_REPOS,
+        ADMIN_JOURNAL_REPOS_ORDER,
+        ADMIN_JOURNAL_REPO,
+        ADMIN_JOURNAL_STACK,
+        ADMIN_JOURNAL_STACK_ORDER,
+        ADMIN_JOURNAL_STACK_ITEM,
+        ADMIN_MESSAGES,
+        ADMIN_MESSAGE_RESTORE,
+        ADMIN_MESSAGE_REPORTS,
     ];
 
     /// Path `POST` untuk melaporkan entri `id`.
