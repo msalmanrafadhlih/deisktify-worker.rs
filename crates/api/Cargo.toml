@@ -21,6 +21,8 @@ axum = { version = "0.8", default-features = false, features = ["json", "query"]
 tower-service = "0.3"
 console_error_panic_hook = "0.1"
 sha2 = "0.10"
+# Sudah ikut lewat `worker`; `alloc` untuk join_all, tanpa std/executor.
+futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

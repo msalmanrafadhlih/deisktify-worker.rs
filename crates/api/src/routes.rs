@@ -27,6 +27,8 @@ use crate::{
     journal_admin::{self, List, OrderBody, ProfileBody, RepoBody, StackBody},
     moderation,
     panel::{self, Access, PanelError},
+    radio_check::{self, RadioError},
+    radio_probe::WorkerProbe,
     tables::{self, Table},
 };
 
@@ -1097,6 +1099,60 @@ pub async fn admin_journal_refresh(
                 worker::console_error!("journal refresh: {e}");
             }
             Ok(journal_error(&e))
+        }
+    }
+}
+
+/// Pesan error umum; detail hanya ke log Worker.
+pub fn radio_error(e: &RadioError) -> Response {
+    use turso_http::Error;
+    match e {
+        RadioError::TooSoon { retry_after_secs } => {
+            too_many(u32::try_from(*retry_after_secs).unwrap_or(u32::MAX))
+        }
+        RadioError::NotConfigured(_) => AppError::NOT_CONFIGURED.into_response(),
+        RadioError::Db(Error::Config(_) | Error::Transport(_) | Error::Http { .. }) => {
+            AppError::UNAVAILABLE.into_response()
+        }
+        RadioError::Db(_) | RadioError::BadData(_) => AppError::INTERNAL.into_response(),
+    }
+}
+
+/// `GET /api/v1/admin/radio`: status pemeriksaan semua stasiun (tanpa URL).
+#[worker::send]
+pub async fn admin_radio(
+    State(config): State<Arc<Config>>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let admin = gate!(&config, &headers, "admin radio");
+    match radio_check::status(&admin.client, admin.now).await {
+        Ok(status) => Ok(Json(status).into_response()),
+        Err(e) => {
+            worker::console_error!("admin radio: {e}");
+            Ok(radio_error(&e))
+        }
+    }
+}
+
+/// `POST /api/v1/admin/radio/check`: periksa stasiun aktif sekarang. Hanya
+/// admin; paling cepat sekali per menit.
+#[worker::send]
+pub async fn admin_radio_check(
+    State(config): State<Arc<Config>>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let admin = gate!(&config, &headers, "admin radio check");
+    match radio_check::check_now(&admin.client, &WorkerProbe, admin.now).await {
+        Ok(report) => {
+            audit(&admin, "radio.check", None).await;
+            worker::console_log!("radio (manual): {report}");
+            Ok(Json(report).into_response())
+        }
+        Err(e) => {
+            if !matches!(e, RadioError::TooSoon { .. }) {
+                worker::console_error!("admin radio check: {e}");
+            }
+            Ok(radio_error(&e))
         }
     }
 }

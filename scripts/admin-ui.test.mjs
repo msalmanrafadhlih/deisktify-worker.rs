@@ -225,7 +225,7 @@ test("an empty token never reaches the network", async () => {
 
 // ------------------------------------------------------------------ statis
 
-const jsFiles = ["app.js", "api.js", "logic.js", "parts.js", "journal.js", "guestbook.js", "data.js"];
+const jsFiles = ["app.js", "api.js", "logic.js", "parts.js", "journal.js", "guestbook.js", "data.js", "radio.js"];
 
 test("the page has no inline script or style and loads one module from its own folder", () => {
   const html = read(admin, "index.html");
@@ -311,6 +311,8 @@ test("client paths match the Rust contract", () => {
     presetItems: "ADMIN_PRESET_ITEMS",
     presetItemsSet: "ADMIN_PRESET_ITEMS_SET",
     messagePurge: "ADMIN_MESSAGE_PURGE",
+    radio: "ADMIN_RADIO",
+    radioCheck: "ADMIN_RADIO_CHECK",
   };
   for (const [key, rustName] of Object.entries(pairs)) assert.equal(PATHS[key], path(rustName), key);
   assert.deepEqual(Object.keys(PATHS).sort(), [...Object.keys(pairs), "login", "overview", "audit"].sort(), "every client path is checked");
@@ -496,7 +498,7 @@ test("a 429 from refresh keeps its wait time and a 409 is reported as such", asy
 });
 
 test("the new screens only render server text as text", () => {
-  for (const name of ["journal.js", "guestbook.js", "parts.js", "data.js"]) {
+  for (const name of ["journal.js", "guestbook.js", "parts.js", "data.js", "radio.js"]) {
     const src = read(admin, name);
     assert.doesNotMatch(src, /href=|src=\$\{|target=/, `${name} must not build links or images from data`);
   }
@@ -678,4 +680,122 @@ test("the data tab keeps every table decision on the server", () => {
   assert.equal([...src.matchAll(/"chat_messages"/g)].length, 1, "one hint pointing to the Guestbook tab");
   assert.match(src, /embience_presets/, "only the preset editor is special-cased");
   assert.equal([...src.matchAll(/"embience[a-z_]*"/g)].length, 2, "just the preset table name and the embience list the preset editor needs");
+});
+
+// ------------------------------------------------------------ D7b: Radio
+
+const wireStation = (over = {}) => ({
+  id: 1, label: "Delta FM", is_active: true, checkable: true, link_changed: false,
+  last_result: "ok", last_status: 200, last_checked_at: "2026-10-24T11:17:00Z", last_ok_at: "2026-10-24T11:17:00Z",
+  failing_since: null, consecutive_failures: 0, disabled_by_check: false, ...over,
+});
+const wireRadio = (items = [wireStation()]) => ({
+  now: "2026-10-24T12:00:00Z",
+  next_run_at: "2026-10-24T12:17:00Z",
+  rules: { fail_threshold: 3, min_fail_hours: 6, batch: 12, min_manual_secs: 60 },
+  items,
+});
+const rules = { failThreshold: 3, minFailHours: 6, batch: 12, minManualSecs: 60 };
+const NOW = "2026-10-24T12:00:00Z";
+const station = (over, r = rules) => {
+  const radio = logic.normalizeRadio(wireRadio([wireStation(over)]));
+  return logic.describeStation(radio.items[0], r, NOW);
+};
+
+test("radio status is checked row by row and renamed for the screen", () => {
+  const radio = logic.normalizeRadio(wireRadio([wireStation(), wireStation({ id: 2, label: "Off", is_active: false, last_result: null, last_checked_at: null })]));
+  assert.equal(radio.nextRunAt, "2026-10-24T12:17:00Z");
+  assert.deepEqual(radio.rules, rules);
+  assert.equal(radio.items.length, 2);
+  assert.deepEqual(radio.items[0], {
+    id: 1, label: "Delta FM", isActive: true, checkable: true, linkChanged: false, result: "ok", status: 200,
+    checkedAt: "2026-10-24T11:17:00Z", okAt: "2026-10-24T11:17:00Z", failingSince: null, failures: 0, disabledByCheck: false,
+  });
+  assert.equal(radio.items[1].result, null);
+  for (const bad of [
+    null, [], {}, { ...wireRadio(), items: "x" }, { ...wireRadio(), rules: null }, { ...wireRadio(), now: 5 },
+    { ...wireRadio(), rules: { ...wireRadio().rules, batch: -1 } },
+    wireRadio([wireStation({ id: 0 })]),
+    wireRadio([wireStation({ label: 7 })]),
+    wireRadio([wireStation({ last_result: "weird" })]),
+    wireRadio([wireStation({ consecutive_failures: "3" })]),
+  ]) assert.equal(logic.normalizeRadio(bad), null, JSON.stringify(bad)?.slice(0, 60));
+});
+
+test("every station state is explained in Indonesian with a tone", () => {
+  assert.deepEqual([station({}).tone, station({}).label], ["ok", "Sehat"]);
+  assert.match(station({}).detail, /Dicek 43 menit lalu/);
+
+  const failing = station({ last_result: "http", last_status: 403, consecutive_failures: 2, failing_since: "2026-10-24T03:17:00Z" });
+  assert.equal(failing.tone, "warn");
+  assert.equal(failing.label, "Gagal 2×");
+  assert.match(failing.detail, /menjawab 403/);
+  assert.match(failing.detail, /3 kegagalan berturut-turut dan minimal 6 jam/);
+  assert.match(station({ last_result: "timeout", consecutive_failures: 1 }).detail, /terlalu lama/);
+  assert.match(station({ last_result: "network", consecutive_failures: 1 }).detail, /tidak bisa tersambung/);
+  assert.match(station({ last_result: "redirect", last_status: 302, consecutive_failures: 1 }).detail, /pengalihan/);
+  assert.match(station({ last_result: "http", last_status: null, consecutive_failures: 1 }).detail, /menolak/);
+
+  const auto = station({ is_active: false, disabled_by_check: true, consecutive_failures: 3 });
+  assert.deepEqual([auto.tone, auto.label], ["bad", "Dimatikan otomatis"]);
+  assert.match(auto.detail, /tab Data/);
+  const manual = station({ is_active: false });
+  assert.deepEqual([manual.tone, manual.label], ["muted", "Nonaktif"]);
+
+  assert.equal(station({ link_changed: true }).label, "Tautan baru");
+  assert.equal(station({ checkable: false }).label, "Tidak diperiksa");
+  assert.match(station({ checkable: false }).detail, /tidak akan dimatikan/);
+  assert.equal(station({ last_result: null, last_checked_at: null }).label, "Belum diperiksa");
+  assert.equal(station({ last_result: "skipped", last_status: 302 }).label, "Tidak diperiksa");
+  const unsure = station({ last_result: "inconclusive", consecutive_failures: 2 });
+  assert.deepEqual([unsure.tone, unsure.label], ["warn", "Belum meyakinkan"]);
+  assert.match(unsure.detail, /Sebelumnya gagal 2 kali/);
+  assert.equal(station({ last_result: "inconclusive" }).tone, "muted");
+  // Penjelasan "dimatikan otomatis" tidak berlaku untuk stasiun yang masih aktif tetapi tak bisa diperiksa.
+  assert.doesNotMatch(station({ checkable: false }).detail, /Dimatikan otomatis setelah/);
+});
+
+test("the manual check button waits out the server's minimum gap, by the server's clock", () => {
+  const radio = (checkedAt, now = NOW) => ({ ...logic.normalizeRadio(wireRadio([wireStation({ last_checked_at: checkedAt })])), now });
+  assert.equal(logic.manualWait(radio("2026-10-24T11:59:30Z")), 30);
+  assert.equal(logic.manualWait(radio("2026-10-24T11:59:00Z")), 0);
+  assert.equal(logic.manualWait(radio("2026-10-24T11:17:00Z")), 0);
+  assert.equal(logic.manualWait(radio(null)), 0, "never checked");
+  assert.equal(logic.manualWait(radio("2026-10-24T18:00:00Z")), 60, "a clock that ran backwards never locks it for longer than the gap");
+  assert.equal(logic.manualWait({ ...radio("2026-10-24T11:59:30Z"), now: "nonsense" }), 0);
+});
+
+test("the manual check result is checked and summarised with station names", () => {
+  const wire = { checked: 5, ok: 2, failed: 1, skipped: 2, inconclusive: 0, disabled: [3] };
+  const report = logic.normalizeRadioReport(wire);
+  assert.deepEqual(report, { ...wire });
+  const line = logic.describeRadioReport(report, (id) => (id === 3 ? "Delta FM" : "?"));
+  assert.match(line, /5 stasiun diperiksa, 2 sehat, 1 gagal, 2 dilewati\./);
+  assert.match(line, /Dimatikan otomatis: Delta FM\./);
+  assert.doesNotMatch(logic.describeRadioReport(logic.normalizeRadioReport({ ...wire, failed: 0, skipped: 0, disabled: [] }), String), /Dimatikan|gagal|dilewati/);
+  assert.match(logic.describeRadioReport(logic.normalizeRadioReport({ checked: 0, ok: 0, failed: 0, skipped: 0, inconclusive: 0, disabled: [] }), String), /Tidak ada stasiun aktif/);
+  for (const bad of [null, {}, { ...wire, checked: -1 }, { ...wire, disabled: [0] }, { ...wire, disabled: "x" }, { ...wire, ok: "2" }]) {
+    assert.equal(logic.normalizeRadioReport(bad), null, JSON.stringify(bad));
+  }
+});
+
+test("radio calls use GET for the status and POST for the check, with no body and no query", async () => {
+  const { api, f } = await signedIn((url, init) => (init.method === "GET" ? reply(200, wireRadio()) : reply(200, { checked: 0, ok: 0, failed: 0, skipped: 0, inconclusive: 0, disabled: [] })));
+  assert.ok(logic.normalizeRadio(await api.radio()));
+  assert.ok(logic.normalizeRadioReport(await api.radioCheck()));
+  assert.deepEqual(f.calls.slice(-2).map((c) => `${c.init.method} ${c.url}`), ["GET /api/v1/admin/radio", "POST /api/v1/admin/radio/check"]);
+  assert.equal(f.calls.at(-1).init.body, undefined);
+});
+
+test("a 429 from the manual check keeps its wait time", async () => {
+  const { api } = await signedIn((url) => (url.endsWith("/radio/check") ? reply(429, { error: {} }, { "retry-after": "42" }) : reply(200, goodOverview())));
+  await assert.rejects(api.radioCheck(), (e) => e.status === 429 && e.retryAfter === 42);
+});
+
+test("the radio screen never asks for or shows stream URLs", () => {
+  for (const name of ["radio.js", "logic.js"]) {
+    const src = read(admin, name);
+    assert.doesNotMatch(src, /stream_url|checked_url|streamUrl|checkedUrl/, name);
+  }
+  assert.match(read(admin, "app.js"), /id: "radio", label: "Radio"/);
 });

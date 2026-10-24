@@ -11,9 +11,13 @@ command = "worker-build --release"
 watch_dir = "src"
 
 [triggers]
-# Ambil statistik GitHub untuk halaman /profile tiap 6 jam (UTC). Plan gratis:
-# maksimal 5 cron per akun dan CPU 10 ms per eksekusi. Butuh secret GITHUB_TOKEN.
-crons = ["0 */6 * * *"]
+# Plan gratis: maksimal 5 cron per akun (hitung juga Worker lain di akun yang sama;
+# ekspresi cron yang berbeda dihitung sendiri-sendiri), CPU 10 ms per eksekusi,
+# 50 subrequest per eksekusi.
+#   "0 */6 * * *"  statistik GitHub untuk /profile tiap 6 jam (UTC). Butuh GITHUB_TOKEN.
+#   "17 * * * *"   pemeriksa stasiun radio (D7) tiap jam, menit ke-17. Harus sama
+#                  dengan radio_check::CRON (ada tesnya).
+crons = ["0 */6 * * *", "17 * * * *"]
 
 [assets]
 # Dashboard admin (D6a): berkas statis di ../../web dilayani Worker yang sama, jadi

@@ -41,6 +41,7 @@ const ACTION_LABELS = {
   "table.export": "Ekspor data",
   "preset.items": "Ubah isi preset suara latar",
   "message.purge": "Hapus permanen entri Guestbook",
+  "radio.check": "Cek stasiun radio sekarang",
 };
 
 export function tableLabel(name) {
@@ -496,4 +497,133 @@ export function normalizePresetItems(raw) {
 /** Menyimpan teks sebagai berkas unduhan (dipakai tombol Ekspor). */
 export function downloadName(table, format) {
   return `${table}.${format === "csv" ? "csv" : "json"}`;
+}
+
+// ------------------------------------------------------- Radio (D7b)
+
+const RESULTS = ["ok", "http", "network", "timeout", "redirect", "skipped", "inconclusive"];
+
+/** Status pemeriksaan radio dari server -> bentuk tampil, atau `null` jika rusak. */
+export function normalizeRadio(raw) {
+  if (!isObj(raw) || !isObj(raw.rules) || !Array.isArray(raw.items)) return null;
+  const rules = {
+    failThreshold: count(raw.rules.fail_threshold),
+    minFailHours: count(raw.rules.min_fail_hours),
+    batch: count(raw.rules.batch),
+    minManualSecs: count(raw.rules.min_manual_secs),
+  };
+  const items = raw.items.map((r) => {
+    if (!isObj(r) || !isId(r.id) || text(r.label) === null) return null;
+    const optText = (v) => (v == null ? null : text(v));
+    const result = r.last_result == null ? null : text(r.last_result);
+    if (result !== null && !RESULTS.includes(result)) return null;
+    const failures = count(r.consecutive_failures);
+    if (failures === null) return null;
+    return {
+      id: r.id,
+      label: r.label,
+      isActive: r.is_active === true,
+      checkable: r.checkable === true,
+      linkChanged: r.link_changed === true,
+      result,
+      status: count(r.last_status),
+      checkedAt: optText(r.last_checked_at),
+      okAt: optText(r.last_ok_at),
+      failingSince: optText(r.failing_since),
+      failures,
+      disabledByCheck: r.disabled_by_check === true,
+    };
+  });
+  if (items.includes(null) || Object.values(rules).includes(null)) return null;
+  if (text(raw.now) === null || text(raw.next_run_at) === null) return null;
+  return { now: raw.now, nextRunAt: raw.next_run_at, rules, items };
+}
+
+const FAILURE_REASONS = {
+  network: "tidak bisa tersambung ke server radio",
+  timeout: "server radio terlalu lama menjawab",
+  redirect: "pengalihan (redirect) tidak valid",
+};
+
+/**
+ * Keadaan satu stasiun dalam kata-kata: `tone` (`ok`, `warn`, `bad`, `muted`),
+ * `label` singkat, dan `detail` yang menjelaskan apa artinya bagi admin.
+ */
+export function describeStation(item, rules, nowIso) {
+  if (!item.isActive) {
+    return item.disabledByCheck
+      ? {
+          tone: "bad",
+          label: "Dimatikan otomatis",
+          detail: `Pemeriksa menonaktifkan stasiun ini setelah ${rules.failThreshold} kegagalan berturut-turut. Tempel tautan baru lewat tab Data, lalu aktifkan lagi.`,
+        }
+      : { tone: "muted", label: "Nonaktif", detail: "Dinonaktifkan dari tab Data; tidak diperiksa." };
+  }
+  if (item.linkChanged) {
+    return { tone: "muted", label: "Tautan baru", detail: "Tautannya diganti sejak pemeriksaan terakhir; riwayat mulai dari nol di pemeriksaan berikutnya." };
+  }
+  if (!item.checkable) {
+    return {
+      tone: "muted",
+      label: "Tidak diperiksa",
+      detail: "Tautannya bukan https biasa (atau memakai port khusus), jadi tidak bisa diperiksa dari Cloudflare. Stasiun ini tidak akan dimatikan otomatis.",
+    };
+  }
+  if (item.result === null) return { tone: "muted", label: "Belum diperiksa", detail: "Menunggu pemeriksaan pertama." };
+  const ago = item.checkedAt ? timeAgo(item.checkedAt, nowIso) : "";
+  if (item.result === "ok") return { tone: "ok", label: "Sehat", detail: `Dicek ${ago}.` };
+  if (item.result === "skipped") {
+    return { tone: "muted", label: "Tidak diperiksa", detail: "Tautannya dialihkan ke tujuan yang tidak boleh diperiksa. Stasiun ini tidak akan dimatikan otomatis." };
+  }
+  if (item.result === "inconclusive") {
+    const earlier = item.failures > 0 ? ` Sebelumnya gagal ${item.failures} kali berturut-turut.` : "";
+    return {
+      tone: item.failures > 0 ? "warn" : "muted",
+      label: "Belum meyakinkan",
+      detail: `Hasil terakhir tidak dihitung (server radio membatasi permintaan, atau semua stasiun gagal sekaligus sehingga masalahnya diduga di sisi Cloudflare).${earlier}`,
+    };
+  }
+  const reason = item.result === "http" ? (item.status ? `server radio menjawab ${item.status}` : "server radio menolak") : FAILURE_REASONS[item.result];
+  const since = item.failingSince ? `, gagal sejak ${formatLocal(item.failingSince)}` : "";
+  return {
+    tone: "warn",
+    label: `Gagal ${item.failures}×`,
+    detail: `Dicek ${ago}: ${reason}${since}. Dimatikan otomatis setelah ${rules.failThreshold} kegagalan berturut-turut dan minimal ${rules.minFailHours} jam.`,
+  };
+}
+
+/** Sisa detik sebelum "Cek sekarang" boleh dipakai lagi, menurut jam server. */
+export function manualWait(radio) {
+  const now = Date.parse(radio.now);
+  const last = Math.max(0, ...radio.items.map((i) => Date.parse(i.checkedAt ?? "")).filter(Number.isFinite));
+  if (!Number.isFinite(now) || last === 0) return 0;
+  const wait = Math.ceil(radio.rules.minManualSecs - (now - last) / 1000);
+  return Math.min(Math.max(wait, 0), radio.rules.minManualSecs);
+}
+
+/** Hasil "Cek sekarang" dari server -> bentuk tampil, atau `null` jika rusak. */
+export function normalizeRadioReport(raw) {
+  if (!isObj(raw) || !Array.isArray(raw.disabled)) return null;
+  const out = {
+    checked: count(raw.checked),
+    ok: count(raw.ok),
+    failed: count(raw.failed),
+    skipped: count(raw.skipped),
+    inconclusive: count(raw.inconclusive),
+    disabled: raw.disabled,
+  };
+  if (Object.entries(out).some(([k, v]) => k !== "disabled" && v === null)) return null;
+  return out.disabled.every(isId) ? out : null;
+}
+
+/** Ringkasan satu kalimat; nama stasiun dicari lewat `labelOf(id)`. */
+export function describeRadioReport(report, labelOf) {
+  if (report.checked === 0) return "Tidak ada stasiun aktif yang perlu diperiksa.";
+  const parts = [`${report.checked} stasiun diperiksa`, `${report.ok} sehat`];
+  if (report.failed) parts.push(`${report.failed} gagal`);
+  if (report.skipped) parts.push(`${report.skipped} dilewati`);
+  if (report.inconclusive) parts.push(`${report.inconclusive} belum meyakinkan`);
+  let line = `${parts.join(", ")}.`;
+  if (report.disabled.length) line += ` Dimatikan otomatis: ${report.disabled.map(labelOf).join(", ")}.`;
+  return line;
 }

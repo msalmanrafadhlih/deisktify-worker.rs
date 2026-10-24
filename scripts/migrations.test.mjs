@@ -53,7 +53,7 @@ test("all migrations apply to an empty database", () => {
   assert.deepEqual(tables, [
     "admin_attempts", "admin_audit", "bookmarks", "chat_messages", "chat_rate_limits", "embience_preset_items", "embience_presets",
     "embiences", "generations", "journal_pinned_repos", "journal_profile", "journal_snapshots",
-    "journal_stack", "message_reports", "radio_stations",
+    "journal_stack", "message_reports", "radio_checks", "radio_stations",
   ]);
 });
 
@@ -119,6 +119,12 @@ test("content seed is separate from the fake samples", () => {
   assert.doesNotMatch(content, /chat_messages|journal_snapshots/);
 });
 
+// Satu stasiun (id 1) lalu satu baris radio_checks dengan nilai yang bisa diganti.
+function radioCheck({ id = 1, at = "'2026-01-01T00:00:00Z'", since = "NULL", result = "'http'", failures = 1, status = "NULL", url = "'https://a.b/s'" }, withStation = true) {
+  const station = withStation ? "INSERT INTO radio_stations (id, label, stream_url) VALUES (1, 's', 'https://a.b/s'); " : "";
+  return `${station}INSERT INTO radio_checks (station_id, checked_url, last_checked_at, failing_since, consecutive_failures, last_result, last_status) VALUES (${id}, ${url}, ${at}, ${since}, ${failures}, ${result}, ${status})`;
+}
+
 const rejected = [
   ["javascript: bookmark URL", "INSERT INTO bookmarks (label, url) VALUES ('x', 'javascript:alert(1)')"],
   ["protocol-relative route", "INSERT INTO generations VALUES (9, 'x', '//evil.example', '1', '2026-01-01')"],
@@ -155,6 +161,17 @@ const rejected = [
   ["audit with an empty target", "INSERT INTO admin_audit (at, action, target, who) VALUES ('2026-01-01T00:00:00Z', 'a', '', 'w')"],
   ["audit with a too long target", `INSERT INTO admin_audit (at, action, target, who) VALUES ('2026-01-01T00:00:00Z', 'a', '${"t".repeat(121)}', 'w')`],
   ["audit without a who", "INSERT INTO admin_audit (at, action, who) VALUES ('2026-01-01T00:00:00Z', 'a', '')"],
+  ["radio check for an unknown station", radioCheck({ id: 99 }, false)],
+  ["radio check with a malformed timestamp", radioCheck({ at: "'yesterday'" })],
+  ["radio check with a malformed failing_since", radioCheck({ since: "'6 hours ago'" })],
+  ["radio check with an unknown result", radioCheck({ result: "'weird'" })],
+  ["radio check with a negative streak", radioCheck({ failures: -1 })],
+  ["radio check with a runaway streak", radioCheck({ failures: 1001 })],
+  ["radio check with a status below 100", radioCheck({ status: 99 })],
+  ["radio check with a status above 599", radioCheck({ status: 600 })],
+  ["radio check with a javascript: URL", radioCheck({ url: "'javascript:alert(1)'" })],
+  ["radio check with a data: URL", radioCheck({ url: "'data:audio/mp3;base64,AAAA'" })],
+  ["radio check URL with a space", radioCheck({ url: "'https://a.b/c d'" })],
 ];
 
 for (const [label, sql] of rejected) {
@@ -947,4 +964,140 @@ test("purge: only a hidden entry is removed, together with its reports", () => {
   assert.equal(db.prepare("SELECT count(*) AS n FROM message_reports WHERE message_id = ?").get(id("b")).n, 0);
   assert.equal(count(db, "message_reports"), 1, "only the purged entry's reports are gone");
   assert.deepEqual(purge(999)[0], []);
+});
+
+// ---- D7a: pemeriksa stasiun radio (crates/api/src/queries/radio_check_*.sql)
+
+const stationRows = (db) => db.prepare("SELECT id, is_active FROM radio_stations ORDER BY id").all().map((r) => ({ ...r }));
+const addStation = (db, id, url, active = 1) =>
+  db.prepare("INSERT INTO radio_stations (id, label, stream_url, is_active) VALUES (?, ?, ?, ?)").run(id, `s${id}`, url, active);
+const record = (db, id, at, { url = `https://s${id}.example/live`, failures = 0, result = "ok" } = {}) =>
+  db.prepare(sqlOf("radio_check_upsert")).run(id, url, at, null, null, failures, result, null, null);
+
+test("radio checks: a valid row is accepted and the upsert updates it in place", () => {
+  const db = freshDb();
+  db.exec(radioCheck({ status: 403 }));
+  assert.equal(count(db, "radio_checks"), 1);
+  record(db, 1, "2026-02-02T00:00:00Z", { url: "https://a.b/s", failures: 2, result: "timeout" });
+  assert.equal(count(db, "radio_checks"), 1, "same station: updated, not duplicated");
+  const row = { ...db.prepare("SELECT * FROM radio_checks").get() };
+  assert.equal(row.last_checked_at, "2026-02-02T00:00:00Z");
+  assert.equal(row.consecutive_failures, 2);
+  assert.equal(row.last_result, "timeout");
+  assert.equal(row.last_status, null, "the upsert writes every column it is given");
+});
+
+test("radio checks: the due query is active stations only, never-checked first, then oldest first", () => {
+  const db = freshDb();
+  for (let id = 1; id <= 5; id++) addStation(db, id, `https://s${id}.example/live`, id === 4 ? 0 : 1);
+  record(db, 1, "2026-03-01T10:00:00Z");
+  record(db, 2, "2026-03-01T08:00:00Z");
+  record(db, 3, "2026-03-01T09:00:00Z");
+  const due = (limit) => rows(db, "radio_check_due", limit).map((r) => r.id);
+  assert.deepEqual(due(10), [5, 2, 3, 1], "never-checked 5 first; inactive 4 never");
+  assert.deepEqual(due(2), [5, 2], "LIMIT is a parameter");
+  record(db, 5, "2026-03-01T11:00:00Z");
+  assert.deepEqual(due(10), [2, 3, 1, 5], "once checked it goes to the back of the line");
+});
+
+test("radio checks: the due query carries the stored history next to the current URL", () => {
+  const db = freshDb();
+  addStation(db, 1, "https://new.example/live");
+  db.prepare(sqlOf("radio_check_upsert")).run(
+    1, "https://old.example/live", "2026-03-01T00:00:00Z", "2026-02-28T00:00:00Z", "2026-02-28T12:00:00Z", 2, "http", 404, null,
+  );
+  const [row] = rows(db, "radio_check_due", 12);
+  assert.deepEqual(row, {
+    id: 1, stream_url: "https://new.example/live", checked_url: "https://old.example/live",
+    failures: 2, failing_since: "2026-02-28T12:00:00Z", last_ok_at: "2026-02-28T00:00:00Z", disabled_at: null,
+  });
+  addStation(db, 2, "https://x.example/live");
+  const fresh = rows(db, "radio_check_due", 12).find((r) => r.id === 2);
+  assert.equal(fresh.checked_url, null);
+  assert.equal(fresh.failures, null);
+});
+
+test("radio checks: disabling only touches an active station whose URL is still the one that was checked", () => {
+  const db = freshDb();
+  addStation(db, 1, "https://a.example/live?rj-tok=NEW");
+  addStation(db, 2, "https://b.example/live");
+  const disable = (id, url) => db.prepare(sqlOf("radio_check_disable")).run(id, url).changes;
+  assert.equal(disable(1, "https://a.example/live?rj-tok=OLD"), 0, "the admin pasted a new link meanwhile");
+  assert.deepEqual(stationRows(db), [{ id: 1, is_active: 1 }, { id: 2, is_active: 1 }]);
+  assert.equal(disable(2, "https://b.example/live"), 1);
+  assert.deepEqual(stationRows(db), [{ id: 1, is_active: 1 }, { id: 2, is_active: 0 }]);
+  assert.equal(disable(2, "https://b.example/live"), 0, "already inactive");
+  // Stasiun nonaktif tidak diperiksa lagi (kebijakan D7a: tidak ada pengaktifan otomatis).
+  assert.deepEqual(rows(db, "radio_check_due", 12).map((r) => r.id), [1]);
+});
+
+test("radio checks: deleting a station removes its check row (the dashboard editor must still work)", () => {
+  const db = freshDb();
+  addStation(db, 1, "https://a.example/live");
+  addStation(db, 2, "https://b.example/live");
+  record(db, 1, "2026-03-01T00:00:00Z");
+  record(db, 2, "2026-03-01T00:00:00Z");
+  db.prepare("DELETE FROM radio_stations WHERE id = 1").run();
+  assert.deepEqual(db.prepare("SELECT station_id FROM radio_checks").all().map((r) => r.station_id), [2]);
+});
+
+test("radio checks: cleanup removes rows whose station is gone even when foreign keys are off", () => {
+  const db = freshDb();
+  addStation(db, 1, "https://a.example/live");
+  addStation(db, 2, "https://b.example/live");
+  record(db, 1, "2026-03-01T00:00:00Z");
+  record(db, 2, "2026-03-01T00:00:00Z");
+  db.exec("PRAGMA foreign_keys = OFF");
+  db.prepare("DELETE FROM radio_stations WHERE id = 1").run();
+  assert.equal(count(db, "radio_checks"), 2, "orphan left behind without the cascade");
+  db.prepare(sqlOf("radio_check_cleanup")).run();
+  assert.deepEqual(db.prepare("SELECT station_id FROM radio_checks").all().map((r) => r.station_id), [2]);
+});
+
+test("radio checks: a seeded database has no check rows and its stations are all due", () => {
+  const db = seededDb();
+  assert.equal(count(db, "radio_checks"), 0);
+  assert.equal(rows(db, "radio_check_due", 12).length, count(db, "radio_stations"));
+  // Seed berlaku sekali dan tidak menyentuh radio_checks.
+  assert.equal(readFileSync(join(root, "seeds/0001_content.sql"), "utf8").includes("radio_checks"), false);
+});
+
+test("radio check queries take every value as a bound parameter", () => {
+  for (const name of ["radio_check_due", "radio_check_upsert", "radio_check_disable"]) {
+    assert.match(sqlOf(name), /\?\d/, `${name} must take its values as parameters`);
+  }
+  assert.match(sqlOf("radio_check_due"), /\bORDER BY\b/);
+});
+
+// ---- D7b: status radio untuk dashboard (admin_radio_list.sql, admin_radio_last.sql)
+
+test("radio status lists every station, active or not, in player order, with its check history", () => {
+  const db = freshDb();
+  addStation(db, 1, "https://a.example/live");
+  addStation(db, 2, "https://b.example/live", 0);
+  addStation(db, 3, "https://c.example/live");
+  db.prepare("UPDATE radio_stations SET sort_order = ? WHERE id = ?").run(5, 1);
+  db.prepare("UPDATE radio_stations SET sort_order = ? WHERE id = ?").run(1, 3);
+  record(db, 3, "2026-03-01T00:00:00Z", { failures: 2, result: "http" });
+  const list = rows(db, "admin_radio_list");
+  assert.deepEqual(list.map((r) => [r.id, r.is_active]), [[2, 0], [3, 1], [1, 1]], "by sort_order then id");
+  const checked = list.find((r) => r.id === 3);
+  assert.equal(checked.failures, 2);
+  assert.equal(checked.last_result, "http");
+  assert.equal(list.find((r) => r.id === 1).last_result, null, "never checked: nulls, not missing rows");
+});
+
+test("radio status: the last check time is the newest of all, or null on an empty table", () => {
+  const db = freshDb();
+  assert.equal(rows(db, "admin_radio_last").length, 1);
+  assert.equal(rows(db, "admin_radio_last")[0].at, null);
+  addStation(db, 1, "https://a.example/live");
+  addStation(db, 2, "https://b.example/live");
+  record(db, 1, "2026-03-01T10:00:00Z");
+  record(db, 2, "2026-03-01T11:30:00Z");
+  assert.equal(rows(db, "admin_radio_last")[0].at, "2026-03-01T11:30:00Z");
+});
+
+test("radio status queries order explicitly and cap the list", () => {
+  assert.match(sqlOf("admin_radio_list"), /ORDER BY s\.sort_order, s\.id\s+LIMIT 200/);
 });

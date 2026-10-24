@@ -120,6 +120,9 @@ form label { display: grid; gap: 4px; }
 .flags { display: flex; gap: 6px; flex-wrap: wrap; }
 .flag { font-size: .8rem; border: 1px solid var(--line); border-radius: 999px; padding: 1px 10px; color: var(--muted); }
 .flag.warn { color: var(--notice); border-color: var(--notice); }
+.flag.ok { color: var(--ok); border-color: var(--ok); }
+.flag.bad { color: var(--danger); border-color: var(--danger); }
+.flag { white-space: nowrap; }
 
 .scroll { overflow-x: auto; background: var(--card); border: 1px solid var(--line); border-radius: 12px; margin-bottom: 12px; }
 table.data { min-width: 36rem; }

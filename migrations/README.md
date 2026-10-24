@@ -15,6 +15,7 @@ pemisah), mis. `0001_generations.sql`. Tabel pertama datang di tahap D2.
 | `chat_messages.deleted_at`, `message_reports` (moderasi Guestbook) | `0008_chat_moderation.sql` |
 | `journal_profile`, `journal_pinned_repos`, `journal_stack` (pengaturan jurnal, nilai awal ikut di migrasi) | `0009_journal_config.sql` |
 | `admin_attempts` (pembatas percobaan masuk gagal), `admin_audit` (riwayat aksi admin) | `0010_admin.sql` |
+| `radio_checks` (hasil pemeriksaan stream radio; tabel baru, tidak mengubah `radio_stations`) | `0011_radio_checks.sql` |
 
 ## Aturan
 

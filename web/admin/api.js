@@ -28,6 +28,8 @@ export const PATHS = {
   presetItems: "/api/v1/admin/presets/items",
   presetItemsSet: "/api/v1/admin/presets/{id}/items",
   messagePurge: "/api/v1/admin/messages/{id}/purge",
+  radio: "/api/v1/admin/radio",
+  radioCheck: "/api/v1/admin/radio/check",
 };
 
 /** Mengisi `{id}`; id selain bilangan bulat positif ditolak sebelum menyentuh jaringan. */
@@ -130,6 +132,10 @@ export function createApi(fetchFn) {
       request("GET", withTable(PATHS.tableExport, table), { query: { format: format === "csv" ? "csv" : "json" }, as: "text" }),
     presetItems: () => request("GET", PATHS.presetItems),
     setPresetItems: async (id, ids) => request("PUT", withId(PATHS.presetItemsSet, id), { body: { ids } }),
+
+    // Radio
+    radio: () => request("GET", PATHS.radio),
+    radioCheck: () => request("POST", PATHS.radioCheck),
 
     // Guestbook
     messages: (filter, before, limit) => {

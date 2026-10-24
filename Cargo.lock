@@ -16,6 +16,7 @@ dependencies = [
  "axum",
  "console_error_panic_hook",
  "futures-executor",
+ "futures-util",
  "serde",
  "serde_json",
  "sha2",

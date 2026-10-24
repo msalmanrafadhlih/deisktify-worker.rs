@@ -11,6 +11,8 @@
 //! - `panel` : dashboard admin (D6a): pembatas percobaan gagal, riwayat aksi, ringkasan
 //! - `journal`/`github`: GitHub Journal (D5): Cron Trigger mengambil statistik dari
 //!   GitHub, `GET /journal` membaca snapshot terakhir
+//! - `radio_check`/`radio_probe`: pemeriksa stasiun radio (D7): Cron Trigger mengetuk
+//!   stream, mencatat hasilnya, dan menandai stasiun yang basi
 //! - `time`  : waktu UTC tanpa dependensi tanggal
 //!
 //! Kode di crate ini harus compile ke wasm32 (tanpa tokio, tanpa thread).
@@ -28,6 +30,8 @@ pub mod journal;
 pub mod journal_admin;
 pub mod moderation;
 pub mod panel;
+pub mod radio_check;
+pub mod radio_probe;
 pub mod routes;
 pub mod tables;
 pub mod time;
@@ -148,6 +152,11 @@ pub fn app(config: Arc<Config>) -> Router {
             api_types::paths::ADMIN_MESSAGE_PURGE,
             post(routes::admin_message_purge),
         )
+        .route(api_types::paths::ADMIN_RADIO, get(routes::admin_radio))
+        .route(
+            api_types::paths::ADMIN_RADIO_CHECK,
+            post(routes::admin_radio_check),
+        )
         .fallback(error::not_found)
         .method_not_allowed_fallback(error::method_not_allowed)
         .with_state(config)
@@ -167,14 +176,27 @@ async fn fetch(
     Ok(app(config).call(req).await?)
 }
 
-/// Cron Trigger (`[triggers] crons` di wrangler.toml): ambil statistik GitHub
-/// dan simpan sebagai snapshot jurnal. Gagal = snapshot lama tetap dipakai;
-/// hasilnya hanya masuk log Worker.
+/// Cron Trigger (`[triggers] crons` di wrangler.toml). Dua pekerjaan, dibedakan
+/// dari ekspresi cron-nya; masing-masing eksekusi punya anggaran subrequest
+/// dan CPU sendiri:
+///
+/// - `radio_check::CRON`: ketuk stasiun radio aktif dan catat hasilnya (D7).
+/// - lainnya (`0 */6 * * *`): ambil statistik GitHub dan simpan sebagai
+///   snapshot jurnal. Gagal = snapshot lama tetap dipakai.
+///
+/// Hasilnya hanya masuk log Worker (tanpa URL: URL stream memuat token).
 #[event(scheduled)]
-async fn scheduled(_event: worker::ScheduledEvent, env: Env, _ctx: worker::ScheduleContext) {
+async fn scheduled(event: worker::ScheduledEvent, env: Env, _ctx: worker::ScheduleContext) {
     console_error_panic_hook::set_once();
     let config = Config::from_env(&env);
     let now_secs = i64::try_from(worker::Date::now().as_millis() / 1000).unwrap_or(0);
+    if event.cron() == radio_check::CRON {
+        match radio_check::run(&config, now_secs).await {
+            Ok(report) => worker::console_log!("radio: {report}"),
+            Err(e) => worker::console_error!("radio: check failed: {e}"),
+        }
+        return;
+    }
     match journal::run(&config, now_secs).await {
         Ok(done) => worker::console_log!("journal: refreshed at {}", done.fetched_at),
         Err(e) => worker::console_error!("journal: refresh failed: {e}"),
@@ -879,6 +901,8 @@ mod tests {
             (fill(p::ADMIN_PRESET_ITEMS), vec![Method::GET]),
             (fill(p::ADMIN_PRESET_ITEMS_SET), vec![Method::PUT]),
             (fill(p::ADMIN_MESSAGE_PURGE), vec![Method::POST]),
+            (fill(p::ADMIN_RADIO), vec![Method::GET]),
+            (fill(p::ADMIN_RADIO_CHECK), vec![Method::POST]),
         ]
     }
 

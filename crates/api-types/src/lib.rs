@@ -105,6 +105,13 @@ pub mod paths {
     /// (`{"confirm":"purge:<id>"}`). Templat rute Axum.
     pub const ADMIN_MESSAGE_PURGE: &str = "/api/v1/admin/messages/{id}/purge";
 
+    // ---- D7b: status radio
+    /// `GET`: status pemeriksaan semua stasiun radio (tanpa URL stream: memuat token).
+    pub const ADMIN_RADIO: &str = "/api/v1/admin/radio";
+    /// `POST`: periksa stasiun aktif sekarang, tanpa menunggu cron. Paling cepat
+    /// sekali per menit (`429` + `Retry-After`).
+    pub const ADMIN_RADIO_CHECK: &str = "/api/v1/admin/radio/check";
+
     /// Semua path; tambahkan endpoint baru di sini juga supaya test prefix mencakupnya.
     pub const ALL: &[&str] = &[
         HEALTH,
@@ -140,6 +147,8 @@ pub mod paths {
         ADMIN_PRESET_ITEMS,
         ADMIN_PRESET_ITEMS_SET,
         ADMIN_MESSAGE_PURGE,
+        ADMIN_RADIO,
+        ADMIN_RADIO_CHECK,
     ];
 
     /// Path `POST` untuk melaporkan entri `id`.
