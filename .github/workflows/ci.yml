@@ -2,9 +2,11 @@ name: CI
 
 # - pull_request: cek saja (fmt, clippy, test, wasm32, fixture, SQL).
 # - push tag `v*`: cek yang sama, lalu job `migrate` menerapkan migrasi dan seed
-#   konten ke database Turso production (hanya kalau semua cek hijau).
+#   konten ke database Turso production (hanya kalau semua cek hijau), lalu job
+#   `deploy` mengirim Worker ke Cloudflare (hanya kalau `migrate` berhasil).
 # - workflow_dispatch (tombol "Run workflow" di tab Actions, hanya dari `main`):
-#   sama seperti tag. Dipakai untuk menjalankan ulang migrasi tanpa tag baru.
+#   hanya `migrate`; TIDAK men-deploy. Dipakai untuk menjalankan ulang migrasi
+#   tanpa tag baru. Deploy selalu dari tag.
 on:
   push:
     tags:
@@ -112,6 +114,9 @@ jobs:
       - name: Dashboard admin (logika, klien API, CSP, pustaka bawaan)
         run: node --test scripts/admin-ui.test.mjs
 
+      - name: Workflow ini sendiri (urutan migrate -> deploy, rahasia, versi dipin)
+        run: node --test scripts/workflow.test.mjs
+
   migrate:
     name: migrasi + seed ke Turso (production)
     needs: [native, wasm, reference-fixtures, sql]
@@ -172,3 +177,74 @@ jobs:
 
       - name: Status sesudah (harus "up to date")
         run: ./target/release/migrate status
+
+  deploy:
+    name: deploy Worker ke Cloudflare (production)
+    # Setelah `migrate`: Worker baru tidak boleh tayang sebelum skemanya ada.
+    # `needs` saja sudah melewati job ini kalau `migrate` gagal atau dilewati,
+    # tetapi syaratnya ditulis lagi supaya niatnya terbaca: hanya dari tag, tidak
+    # pernah dari pull request atau tombol "Run workflow".
+    needs: [migrate]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    # Secret `CLOUDFLARE_*` boleh repository secret atau environment secret
+    # "production" (environment yang sama dengan `migrate`, jadi "Required
+    # reviewers" di sana juga menjaga deploy).
+    environment: production
+    # Dua deploy tidak boleh bersamaan; yang kedua menunggu, bukan membatalkan.
+    concurrency:
+      group: worker-deploy
+      cancel-in-progress: false
+    permissions:
+      contents: read
+    env:
+      # Hanya dua ini yang diketahui CI. Rahasia Worker (ADMIN_TOKEN, TURSO_*,
+      # GITHUB_TOKEN, RATE_LIMIT_SALT, BANNED_WORDS) tetap di Cloudflare
+      # (`wrangler secret put`); `wrangler deploy` tidak menyentuhnya.
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      # Versi wrangler dipin persis (tidak `latest`, tidak rentang; ada tesnya).
+      # Dirilis 2026-10-14, setelah `compatibility_date` di crates/api/wrangler.toml
+      # (2026-10-01), jadi runtime workerd-nya mengenal tanggal itu. Naikkan
+      # sengaja, lalu cek log deploy.
+      WRANGLER_VERSION: "4.151.0"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Periksa secret Cloudflare
+        run: |
+          if [ -z "$CLOUDFLARE_API_TOKEN" ] || [ -z "$CLOUDFLARE_ACCOUNT_ID" ]; then
+            echo "::error::Secret CLOUDFLARE_API_TOKEN dan/atau CLOUDFLARE_ACCOUNT_ID belum di-set (Settings > Secrets and variables > Actions)."
+            exit 1
+          fi
+
+      - uses: dtolnay/rust-toolchain@1.97.0
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Pasang worker-build (versi sama dengan job wasm dan wrangler.toml)
+        run: cargo install worker-build --version 0.8.7 --locked
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Deploy (wrangler menjalankan worker-build, lalu mengunggah Worker dan dashboard /admin/)
+        working-directory: crates/api
+        run: npx --yes "wrangler@${WRANGLER_VERSION}" deploy
+
+      - name: Cek Worker yang baru tayang
+        # Opsional: isi variable repo `API_BASE_URL` (https://host, tanpa path;
+        # sama dengan variable di repo frontend). Isinya alamat publik, bukan rahasia.
+        env:
+          API_BASE_URL: ${{ vars.API_BASE_URL }}
+        run: |
+          if [ -z "$API_BASE_URL" ]; then
+            echo "::notice::Variable API_BASE_URL belum di-set; cek /health dan /admin/ dilewati."
+            exit 0
+          fi
+          # Worker baru butuh beberapa detik untuk menyebar; ulangi dulu.
+          curl -fsS --retry 6 --retry-delay 5 --retry-all-errors -o /dev/null -w "health: HTTP %{http_code}\n" "$API_BASE_URL/api/v1/health"
+          curl -fsS --retry 6 --retry-delay 5 --retry-all-errors -o /dev/null -w "admin: HTTP %{http_code}\n" "$API_BASE_URL/admin/"

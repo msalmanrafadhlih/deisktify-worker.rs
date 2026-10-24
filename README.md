@@ -18,7 +18,7 @@ Rencana dan keputusan lengkap (D0–D8) ada di README repo frontend, bagian "Ful
 | `scripts/gen_golden.mjs` | Membangkitkan/memvalidasi fixture protokol dengan klien referensi resmi Turso |
 | `scripts/gen_seed.mjs` | Membangkitkan `seeds/*.sql` dari `seeds/source/*.json` |
 | `scripts/migrations.test.mjs` | Menerapkan migrasi + seed di SQLite sungguhan (`node:sqlite`) dan menguji constraint |
-| `.github/workflows/ci.yml` | fmt, clippy, test (native), clippy + build wasm32, cek fixture, uji migrasi di SQLite |
+| `.github/workflows/ci.yml` | fmt, clippy, test (native), clippy + build wasm32, cek fixture, uji migrasi di SQLite; pada tag `v*`: `migrate` ke Turso lalu `deploy` Worker ke Cloudflare (D8a) |
 
 ## Endpoint
 
@@ -170,9 +170,10 @@ cargo test --workspace --locked
 cargo clippy -p api --target wasm32-unknown-unknown --locked -- -D warnings
 node --test scripts/migrations.test.mjs     # Node >= 22.13
 node --test scripts/admin-ui.test.mjs       # dashboard admin (Node >= 22.7)
+node --test scripts/workflow.test.mjs       # .github/workflows/ci.yml (urutan job, rahasia, versi dipin)
 ```
 
-## Deploy manual pertama (sebelum ada workflow deploy di D8)
+## Deploy manual pertama (D8a menggantinya untuk deploy berikutnya)
 
 ```sh
 turso auth login
@@ -200,7 +201,27 @@ Sejak D3, migrasi dan seed konten ke Turso production dijalankan otomatis oleh j
 - **Aturan migrasi:** job ini jalan *sebelum* Worker baru di-deploy, jadi Worker lama masih berjalan di skema baru. Migrasi harus kompatibel mundur (tambah tabel/kolom, jangan hapus atau ganti nama dulu; hapus di rilis berikutnya).
 - Seed konten berlaku **sekali** (penanda `_seeded`, lihat bagian Dashboard admin): mengubah `seeds/source/*.json` **tidak** memperbarui database yang sudah terisi. Mengubah konten yang sudah tayang = lewat dashboard (tab Data), atau migrasi baru bila bentuknya berubah. Aman diulang tiap tag: seed kedua tidak melakukan apa-apa.
 - Migrasi `0007_chat_rate_limits` dan `0008_chat_moderation` ikut diterapkan job ini; log akhir harus "up to date (8 applied)". `0008` hanya menambah kolom `deleted_at` dan tabel `message_reports`, jadi Worker lama (v0.3.0) tetap jalan di skema baru. Nama tabel `chat_messages` dan path `/messages` sengaja tidak diganti jadi "guestbook" karena alasan yang sama.
-- Deploy Worker tetap terpisah (`npx wrangler deploy` dari `crates/api`, atau D8).
+- Deploy Worker dilakukan job `deploy` sesudah `migrate` (lihat bagian berikutnya).
+
+### Deploy otomatis (D8a)
+
+Job `deploy` di `.github/workflows/ci.yml` men-deploy Worker (beserta dashboard `/admin/` dan cron) ke Cloudflare:
+
+- **Pemicu: hanya push tag `v*`**, dan hanya setelah `migrate` berhasil (yang sendiri menunggu fmt, clippy, test, wasm32, fixture, SQL). Pull request dan tombol *Run workflow* **tidak** men-deploy (tombol itu tetap menjalankan `migrate` saja). Urutannya sengaja migrasi dulu: Worker baru tidak boleh tayang sebelum skemanya ada, dan migrasi harus kompatibel mundur karena Worker lama masih jalan sebentar di skema baru.
+- **Langkah:** pasang Rust 1.97.0 + target wasm32 dan `worker-build` 0.8.7 (sama dengan job `wasm` dan komentar di `wrangler.toml`), lalu dari `crates/api`: `npx wrangler@4.151.0 deploy`. Wrangler yang menjalankan `[build]` (`worker-build --release`) dan mengunggah Worker, aset `/admin/`, dan jadwal cron. Tanpa action pihak ketiga (`cloudflare/wrangler-action` sengaja tidak dipakai) supaya token Cloudflare tidak bertemu kode luar; hanya `actions/*`, `dtolnay/rust-toolchain`, dan `Swatinem/rust-cache`.
+- **Cek sesudah deploy** (opsional): kalau variable repo `API_BASE_URL` diisi (`https://host`, tanpa path, sama dengan variable di repo frontend), CI memanggil `/api/v1/health` dan `/admin/` dengan beberapa kali ulang. `/health` menjawab `503` bila database tidak terjangkau, jadi deploy yang merusak koneksi DB langsung terlihat merah. Hanya membaca, tanpa kredensial.
+- **Secret yang dibutuhkan** (Settings > Environments > production > Environment secrets, atau repository secrets): `CLOUDFLARE_API_TOKEN` dan `CLOUDFLARE_ACCOUNT_ID`. Hanya job `deploy` yang memakainya (ada tesnya). **Rahasia Worker tidak ada di CI**: `ADMIN_TOKEN`, `TURSO_AUTH_TOKEN`, `TURSO_DATABASE_URL`, `GITHUB_TOKEN`, `RATE_LIMIT_SALT`, `BANNED_WORDS` tetap di Cloudflare (`npx wrangler secret put ...`) dan tidak disentuh `wrangler deploy`.
+
+**Membuat token Cloudflare** (sekali):
+
+1. Dashboard Cloudflare > My Profile > API Tokens > Create Token > template **Edit Cloudflare Workers**. Batasi *Account Resources* ke akunmu saja; *Zone Resources* tidak perlu (Worker ini di `workers.dev`). Membuat sendiri tanpa template: *Account > Workers Scripts > Edit* dan *Account > Account Settings > Read*. Kalau deploy gagal `403`, pesan Cloudflare menyebut izin yang kurang. Jangan memakai Global API Key.
+2. Account ID: dashboard > Workers & Pages > ringkasan, panel kanan (atau URL dashboard setelah `/`).
+3. GitHub repo backend > Settings > Environments > `production` > Add secret, dua kali. Kalau memakai *Required reviewers* di environment itu, GitHub meminta persetujuan untuk `migrate` **dan** `deploy` (satu kali per job).
+4. (Opsional) Settings > Secrets and variables > Actions > Variables: `API_BASE_URL`.
+
+Log Actions repo publik itu publik: nilai kedua secret disamarkan GitHub dan tidak pernah dicetak oleh workflow, dan alamat Worker memang publik. Putar token ini di Cloudflare kalau dicurigai bocor (lihat D8c).
+
+Catatan perilaku: `wrangler deploy` menjadikan `[vars]` di `wrangler.toml` sumber kebenaran (`ALLOWED_ORIGINS`); variabel teks biasa yang hanya ada di dashboard Cloudflare bisa tertimpa. Itu sama dengan deploy manual selama ini; simpan nilai sensitif sebagai *secret*, bukan variable.
 
 ### Migrasi manual (debug, atau database lokal)
 
@@ -241,6 +262,7 @@ Sudah (dijalankan di sandbox dengan rustc 1.97.0): `cargo fmt`, `cargo clippy --
 - Dashboard admin (D6a, D6b, D6c): backend (gerbang token, pembatas, riwayat, ringkasan) diuji lewat `tower::oneshot`, transport palsu, dan SQLite sungguhan; UI diuji logikanya, klien API (fetch palsu), dan aturan statis (CSP, tanpa `innerHTML`/`eval`, hash pustaka). Satu kali di sandbox, halaman juga dijalankan di jsdom dengan server palsu berkeadaan (D6a: masuk, token salah, terkunci, Ringkasan, Riwayat + halaman berikutnya, kunci manual dan otomatis; D6b: refresh dengan hitung mundur, ganti akun, tambah repo salah/kembar/penuh, geser urutan, ubah di tempat, hapus dengan konfirmasi, baris yang sudah hilang di server → 404 lalu daftar dimuat ulang, stack, moderasi Guestbook: sembunyikan, tampilkan lagi, tolak laporan, `<img onerror>` tampil sebagai teks, 401 mengunci dashboard); D6c: pilih tabel, tambah dengan isian salah lalu benar (tanpa permintaan saat salah), tabel penuh, ubah, hapus dengan konfirmasi, baris yang sudah hilang, kotak centang dan kolom opsional, kunci yang dipilih admin dan nilai kembar → pesan, editor isi preset, ekspor (unduhan `Blob` dipalsukan), tabel hanya-baca dengan halaman berikutnya, hapus permanen dengan ketik konfirmasi); skrip itu tidak ada di repo (butuh jsdom). **Belum**: browser sungguhan (termasuk apakah unduhan `Blob` jalan di bawah CSP `default-src 'none'`); ekspor tabel besar terhadap batas CPU Worker 10 ms; `wrangler dev`/`deploy` dengan `[assets]` untuk Worker Rust (dokumentasi Cloudflare hanya memberi contoh JavaScript dan Python); apakah pola `/*` di `web/_headers` benar-benar memasang CSP pada `/admin/` (cek header respons di DevTools setelah deploy); `/admin` tanpa garis miring dialihkan ke `/admin/`; serta pembatas dengan `CF-Connecting-IP` dan `ADMIN_TOKEN` sungguhan.
 - Pemeriksa radio (D7a): logika (URL yang boleh diperiksa, redirect, penilaian status, ambang dan jeda, pengaman "semua gagal", tautan diganti, diaktifkan lagi) diuji dengan probe dan transport palsu (29 test), dan SQL-nya (CHECK, upsert, urutan giliran, `UPDATE` bersyarat URL, cascade hapus stasiun) di SQLite sungguhan (`scripts/migrations.test.mjs`). **Belum**: `radio_probe.rs` (satu-satunya yang menyentuh `fetch`) tidak bisa jalan di sandbox; apakah `redirect: manual` mengembalikan `Location`, apakah `AbortController` benar-benar memutus stream tanpa mengunduhnya, dan apakah koneksi yang di-abort tetap dihitung terhadap batas enam koneksi serentak, baru terbukti setelah cron pertama jalan; apakah stasiun nyata (Revma, Radiojar) menjawab `GET` tanpa `Range` dari IP Cloudflare dengan 2xx atau malah memblokirnya (lihat pengaman di atas); angka waktu CPU per eksekusi; dan apakah port non-standar masih diabaikan `fetch` di produksi.
 - Panel Radio (D7b): endpoint (gerbang token, pembatas "Cek sekarang", status tanpa URL) diuji lewat `tower::oneshot`, transport palsu, dan SQLite sungguhan; logika tampilan (kalimat tiap keadaan, hitung mundur, pemeriksaan bentuk respons) dan klien API lewat `scripts/admin-ui.test.mjs`. Satu kali di sandbox, komponen `Radio` juga dirender di jsdom dengan API palsu (muat, tombol Cek sekarang, daftar dimuat ulang, label berisi `<b>` tampil sebagai teks); skrip itu tidak ada di repo. **Belum**: browser sungguhan, dan "Cek sekarang" terhadap Worker sungguhan (lama permintaan dengan stasiun yang lambat: terburuk sekitar 48 detik, 2 kelompok x 3 lompatan x batas tunggu 8 detik; hanya terjadi bila banyak stasiun macet bersamaan).
+- Deploy otomatis (D8a): workflow diperiksa dengan `actionlint` 1.7.12 dan 9 tes statis (`scripts/workflow.test.mjs`: urutan `migrate` lalu `deploy`, hanya dari tag, hanya dua secret Cloudflare di job deploy, versi dipin, allowlist action; uji mutasi: tes gagal bila `latest` dipakai, ada action asing, atau secret Worker masuk). **Belum**: job `deploy` belum pernah jalan di GitHub Actions; `npx wrangler@4.151.0 deploy` dengan `[build]` di runner (di komputermu `wrangler deploy` sudah jalan, tetapi versinya mungkin berbeda); daftar izin token (dari artikel pihak ketiga dan template Cloudflare, bukan dokumen resmi yang bisa dibuka di sandbox); apakah `Swatinem/rust-cache` menyimpan hasil `cargo install worker-build` (kalau tidak, deploy lebih lambat beberapa menit, bukan gagal).
 - Dev shell Nix (`flake.nix`, `devenv.nix`): hanya sintaksnya yang diperiksa.
 
 ## Lisensi
