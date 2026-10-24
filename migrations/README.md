@@ -73,6 +73,13 @@ seed dijalankan ulang tiap rilis dan akan menghidupkan lagi baris yang sudah dih
 Nilai awalnya ditulis di migrasi (yang hanya jalan sekali).
 
 Semua `INSERT OR IGNORE` dengan id eksplisit: dijalankan ulang tidak menggandakan baris
-dan tidak menimpa data yang sudah diubah. Skrip menolak URL tidak valid dan nama
+dan tidak menimpa data yang sudah diubah.
+
+**Seed konten hanya berlaku sekali (sejak D6c).** Konten situs kini dikelola lewat dashboard,
+sedangkan seed dijalankan ulang tiap rilis; tanpa pengaman, baris yang dihapus admin akan hidup
+lagi. Karena itu `0001_content.sql` membuat tabel `_seeded`, mengisi tiap tabel hanya jika
+penanda `content` belum ada, lalu menulis penanda di akhir transaksi yang sama. Akibatnya:
+mengubah `seeds/source/*.json` **tidak lagi** mengubah database yang sudah berjalan (ubah lewat
+dashboard); database baru atau kosong tetap terisi penuh saat seed pertama. Skrip menolak URL tidak valid dan nama
 embience yang tidak dikenal. `preset_id` di JSON sumber kembar (dua preset ber-id 2),
 jadi id preset dibuat dari urutan.

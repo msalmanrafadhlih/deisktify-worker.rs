@@ -167,7 +167,7 @@ jobs:
       - name: Terapkan migrasi (satu transaksi per migrasi)
         run: ./target/release/migrate up --yes
 
-      - name: Seed konten situs (tanpa --samples; aman diulang)
+      - name: Seed konten situs (tanpa --samples; hanya berlaku sekali, aman diulang)
         run: ./target/release/migrate seed --yes
 
       - name: Status sesudah (harus "up to date")

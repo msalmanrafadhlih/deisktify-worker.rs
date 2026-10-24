@@ -1,9 +1,10 @@
-// Dashboard admin (D6a, D6b). JavaScript biasa tanpa build step: Preact + htm
+// Dashboard admin (D6a, D6b, D6c). JavaScript biasa tanpa build step: Preact + htm
 // (vendor/standalone.module.js). Semua teks ke layar lewat Preact (teks biasa,
 // tidak pernah innerHTML), jadi isi dari server tidak bisa menyisipkan markup.
 
 import { html, render, useState, useEffect, useRef } from "./vendor/standalone.module.js";
 import { createApi } from "./api.js";
+import { Data } from "./data.js";
 import { Guestbook } from "./guestbook.js";
 import { Journal } from "./journal.js";
 import {
@@ -213,6 +214,7 @@ const TABS = [
   { id: "overview", label: "Ringkasan" },
   { id: "journal", label: "Journal" },
   { id: "guestbook", label: "Guestbook" },
+  { id: "data", label: "Data" },
   { id: "history", label: "Riwayat" },
 ];
 
@@ -250,6 +252,7 @@ function Shell({ overview, setOverview, onLock, onFail }) {
         ${tab === "overview" && html`<${Overview} overview=${overview} busy=${busy} error=${error} onRefresh=${refresh} />`}
         ${tab === "journal" && html`<${Journal} api=${api} onFail=${onFail} />`}
         ${tab === "guestbook" && html`<${Guestbook} api=${api} onFail=${onFail} />`}
+        ${tab === "data" && html`<${Data} api=${api} onFail=${onFail} />`}
         ${tab === "history" && html`<${History} me=${overview.me} onFail=${onFail} />`}
       </main>
       <footer class="muted">Terkunci otomatis setelah ${IDLE_LIMIT_MS / 60000} menit tidak aktif.</footer>

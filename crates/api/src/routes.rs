@@ -27,6 +27,7 @@ use crate::{
     journal_admin::{self, List, OrderBody, ProfileBody, RepoBody, StackBody},
     moderation,
     panel::{self, Access, PanelError},
+    tables::{self, Table},
 };
 
 /// Konten jarang berubah: browser boleh memakai salinan 1 menit dan menyajikan
@@ -808,6 +809,222 @@ pub async fn admin_message_dismiss(
             Ok(no_content())
         }
         Err(e) => Ok(panel_fail("admin dismiss", &e)),
+    }
+}
+
+// ------------------------------------------------------ Editor data (D6c)
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PurgeBody {
+    confirm: String,
+}
+
+/// Tabel dari daftar putih; apa pun di luarnya 404 (tidak membocorkan nama tabel lain).
+fn known_table(name: &str) -> Result<&'static Table, AppError> {
+    tables::find(name).ok_or(AppError::NOT_FOUND)
+}
+
+/// `GET /api/v1/admin/tables`: tabel yang boleh dikelola, skema, dan jumlah baris.
+#[worker::send]
+pub async fn admin_tables(
+    State(config): State<Arc<Config>>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let admin = gate!(&config, &headers, "admin tables");
+    match tables::overview(&admin.client).await {
+        Ok(items) => Ok(Json(Items { items }).into_response()),
+        Err(e) => Ok(panel_fail("admin tables", &e)),
+    }
+}
+
+/// `GET /api/v1/admin/tables/{table}/rows?before=<kunci>&limit=<n>`.
+#[worker::send]
+pub async fn admin_table_rows(
+    State(config): State<Arc<Config>>,
+    Path(table): Path<String>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let admin = gate!(&config, &headers, "admin rows");
+    let table = known_table(&table)?;
+    let q = panel::parse_audit_query(query.as_deref())
+        .ok_or(AppError::bad_request("Invalid query parameters."))?;
+    match tables::list(&admin.client, table, q.before, q.limit).await {
+        Ok(items) => Ok(Json(Items { items }).into_response()),
+        Err(e) => Ok(panel_fail("admin rows", &e)),
+    }
+}
+
+/// `POST /api/v1/admin/tables/{table}/rows`: menambah baris → `201 {"id"}`.
+#[worker::send]
+pub async fn admin_table_insert(
+    State(config): State<Arc<Config>>,
+    Path(table): Path<String>,
+    headers: HeaderMap,
+    body: Result<Bytes, BytesRejection>,
+) -> Result<Response, AppError> {
+    let admin = gate!(&config, &headers, "admin insert");
+    let table = known_table(&table)?;
+    let body: serde_json::Map<String, serde_json::Value> = admin_json(&headers, body)?;
+    match tables::insert(&admin.client, table, &body).await {
+        Ok(id) => {
+            audit(
+                &admin,
+                "table.insert",
+                Some(&format!("{}:{id}", table.name)),
+            )
+            .await;
+            Ok((StatusCode::CREATED, Json(Created { id })).into_response())
+        }
+        Err(e) => Ok(panel_fail("admin insert", &e)),
+    }
+}
+
+/// `PUT /api/v1/admin/tables/{table}/rows/{id}`: mengubah baris → `204`.
+#[worker::send]
+pub async fn admin_table_update(
+    State(config): State<Arc<Config>>,
+    Path((table, id)): Path<(String, String)>,
+    headers: HeaderMap,
+    body: Result<Bytes, BytesRejection>,
+) -> Result<Response, AppError> {
+    let admin = gate!(&config, &headers, "admin update");
+    let table = known_table(&table)?;
+    let id = parse_id(&id)?;
+    let body: serde_json::Map<String, serde_json::Value> = admin_json(&headers, body)?;
+    match tables::update(&admin.client, table, id, &body).await {
+        Ok(()) => {
+            audit(
+                &admin,
+                "table.update",
+                Some(&format!("{}:{id}", table.name)),
+            )
+            .await;
+            Ok(no_content())
+        }
+        Err(e) => Ok(panel_fail("admin update", &e)),
+    }
+}
+
+/// `DELETE /api/v1/admin/tables/{table}/rows/{id}` → `204`.
+#[worker::send]
+pub async fn admin_table_delete(
+    State(config): State<Arc<Config>>,
+    Path((table, id)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let admin = gate!(&config, &headers, "admin row delete");
+    let table = known_table(&table)?;
+    let id = parse_id(&id)?;
+    match tables::delete(&admin.client, table, id).await {
+        Ok(()) => {
+            audit(
+                &admin,
+                "table.delete",
+                Some(&format!("{}:{id}", table.name)),
+            )
+            .await;
+            Ok(no_content())
+        }
+        Err(e) => Ok(panel_fail("admin row delete", &e)),
+    }
+}
+
+/// `GET /api/v1/admin/tables/{table}/export?format=json|csv`: unduhan berkas.
+#[worker::send]
+pub async fn admin_table_export(
+    State(config): State<Arc<Config>>,
+    Path(table): Path<String>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let admin = gate!(&config, &headers, "admin export");
+    let table = known_table(&table)?;
+    let format = tables::parse_format(query.as_deref())
+        .ok_or(AppError::bad_request("Invalid query parameters."))?;
+    match tables::export(&admin.client, table, format, admin.now).await {
+        Ok(file) => {
+            audit(&admin, "table.export", Some(table.name)).await;
+            let mut res = file.body.into_response();
+            let h = res.headers_mut();
+            h.insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static(file.content_type),
+            );
+            // Nama berkas berasal dari daftar putih (huruf kecil dan `_`), aman di header.
+            if let Ok(v) =
+                HeaderValue::from_str(&format!("attachment; filename=\"{}\"", file.filename))
+            {
+                h.insert(header::CONTENT_DISPOSITION, v);
+            }
+            h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+            h.insert(
+                header::X_CONTENT_TYPE_OPTIONS,
+                HeaderValue::from_static("nosniff"),
+            );
+            Ok(res)
+        }
+        Err(e) => Ok(panel_fail("admin export", &e)),
+    }
+}
+
+/// `GET /api/v1/admin/presets/items`: isi semua preset.
+#[worker::send]
+pub async fn admin_preset_items(
+    State(config): State<Arc<Config>>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let admin = gate!(&config, &headers, "admin preset items");
+    match tables::preset_items(&admin.client).await {
+        Ok(items) => Ok(Json(Items { items }).into_response()),
+        Err(e) => Ok(panel_fail("admin preset items", &e)),
+    }
+}
+
+/// `PUT /api/v1/admin/presets/{id}/items`: mengganti isi satu preset → `204`.
+#[worker::send]
+pub async fn admin_preset_items_set(
+    State(config): State<Arc<Config>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    body: Result<Bytes, BytesRejection>,
+) -> Result<Response, AppError> {
+    let admin = gate!(&config, &headers, "admin preset set");
+    let id = parse_id(&id)?;
+    let body: OrderBody = admin_json(&headers, body)?;
+    match tables::set_preset_items(&admin.client, id, &body.ids).await {
+        Ok(()) => {
+            audit(
+                &admin,
+                "preset.items",
+                Some(&format!("embience_presets:{id}")),
+            )
+            .await;
+            Ok(no_content())
+        }
+        Err(e) => Ok(panel_fail("admin preset set", &e)),
+    }
+}
+
+/// `POST /api/v1/admin/messages/{id}/purge`: hapus permanen entri yang sudah
+/// disembunyikan. Wajib `{"confirm":"purge:<id>"}` → `204`.
+#[worker::send]
+pub async fn admin_message_purge(
+    State(config): State<Arc<Config>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    body: Result<Bytes, BytesRejection>,
+) -> Result<Response, AppError> {
+    let admin = gate!(&config, &headers, "admin purge");
+    let id = parse_id(&id)?;
+    let body: PurgeBody = admin_json(&headers, body)?;
+    match tables::purge_message(&admin.client, id, &body.confirm).await {
+        Ok(()) => {
+            audit(&admin, "message.purge", Some(&format!("message:{id}"))).await;
+            Ok(no_content())
+        }
+        Err(e) => Ok(panel_fail("admin purge", &e)),
     }
 }
 

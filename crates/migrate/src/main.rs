@@ -263,6 +263,25 @@ fn main() -> ExitCode {
 mod tests {
     use super::*;
 
+    /// Pemecah pernyataan milik runner harus bisa membaca seed sungguhan (termasuk
+    /// `INSERT ... SELECT ... FROM (VALUES ...)` dan tanda `%` di default kolom).
+    #[test]
+    fn the_real_content_seed_splits_into_whole_statements() {
+        let sql = include_str!("../../../seeds/0001_content.sql");
+        let stmts = migrate::split_statements(sql).expect("seed splits");
+        // 1 CREATE + 6 tabel konten + 1 penanda.
+        assert_eq!(stmts.len(), 8, "{stmts:#?}");
+        assert!(stmts[0].starts_with("CREATE TABLE IF NOT EXISTS _seeded"));
+        assert!(stmts[0].contains("%Y-%m-%dT%H:%M:%SZ"));
+        for s in &stmts[1..7] {
+            assert!(s.starts_with("INSERT OR IGNORE INTO"), "{s}");
+            assert!(s.contains("WHERE NOT EXISTS (SELECT 1 FROM _seeded WHERE name = 'content')"));
+        }
+        assert!(stmts[7].contains("INTO _seeded"));
+        let samples = include_str!("../../../seeds/0002_samples.sql");
+        assert!(migrate::split_statements(samples).is_ok());
+    }
+
     fn args(list: &[&str]) -> Result<Args, String> {
         parse_args(&list.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>())
     }

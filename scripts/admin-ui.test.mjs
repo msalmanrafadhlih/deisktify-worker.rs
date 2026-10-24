@@ -225,7 +225,7 @@ test("an empty token never reaches the network", async () => {
 
 // ------------------------------------------------------------------ statis
 
-const jsFiles = ["app.js", "api.js", "logic.js", "parts.js", "journal.js", "guestbook.js"];
+const jsFiles = ["app.js", "api.js", "logic.js", "parts.js", "journal.js", "guestbook.js", "data.js"];
 
 test("the page has no inline script or style and loads one module from its own folder", () => {
   const html = read(admin, "index.html");
@@ -304,6 +304,13 @@ test("client paths match the Rust contract", () => {
     message: "ADMIN_MESSAGE",
     messageRestore: "ADMIN_MESSAGE_RESTORE",
     messageReports: "ADMIN_MESSAGE_REPORTS",
+    tables: "ADMIN_TABLES",
+    tableRows: "ADMIN_TABLE_ROWS",
+    tableRow: "ADMIN_TABLE_ROW",
+    tableExport: "ADMIN_TABLE_EXPORT",
+    presetItems: "ADMIN_PRESET_ITEMS",
+    presetItemsSet: "ADMIN_PRESET_ITEMS_SET",
+    messagePurge: "ADMIN_MESSAGE_PURGE",
   };
   for (const [key, rustName] of Object.entries(pairs)) assert.equal(PATHS[key], path(rustName), key);
   assert.deepEqual(Object.keys(PATHS).sort(), [...Object.keys(pairs), "login", "overview", "audit"].sort(), "every client path is checked");
@@ -489,8 +496,186 @@ test("a 429 from refresh keeps its wait time and a 409 is reported as such", asy
 });
 
 test("the new screens only render server text as text", () => {
-  for (const name of ["journal.js", "guestbook.js", "parts.js"]) {
+  for (const name of ["journal.js", "guestbook.js", "parts.js", "data.js"]) {
     const src = read(admin, name);
     assert.doesNotMatch(src, /href=|src=\$\{|target=/, `${name} must not build links or images from data`);
   }
+});
+
+// ----------------------------------------------------------- D6c: logika
+
+const radioTable = () => ({
+  name: "radio_stations", label: "Stasiun radio", editable: true, key: "id", keyLabel: "ID", keyGiven: false,
+  paged: false, maxRows: 60, rows: 2,
+  columns: [
+    { name: "label", label: "Nama", kind: "text", nullable: false, min: 1, max: 80 },
+    { name: "slogan", label: "Slogan", kind: "text", nullable: false, min: 0, max: 160 },
+    { name: "stream_url", label: "Alamat stream", kind: "url", nullable: false, min: null, max: null },
+    { name: "official_link", label: "Situs resmi", kind: "url", nullable: true, min: null, max: null },
+    { name: "sort_order", label: "Urutan", kind: "int", nullable: false, min: -1000000, max: 1000000 },
+    { name: "is_active", label: "Aktif", kind: "bool", nullable: false, min: null, max: null },
+  ],
+});
+const wireTable = () => ({
+  name: "radio_stations", label: "Stasiun radio", editable: true, key: "id", key_label: "ID", key_given: false, paged: false, max_rows: 60, rows: 2,
+  columns: radioTable().columns.map((c) => ({ name: c.name, label: c.label, kind: c.kind, nullable: c.nullable, ...(c.min === null ? {} : { min: c.min, max: c.max }) })),
+});
+
+test("table list from the server is checked and renamed", () => {
+  const out = logic.normalizeTables({ items: [wireTable()] });
+  assert.deepEqual(out[0], radioTable());
+  const broken = [
+    null, {}, { items: [null] }, { items: [{ ...wireTable(), name: "Bad Name" }] }, { items: [{ ...wireTable(), editable: "yes" }] },
+    { items: [{ ...wireTable(), rows: -1 }] }, { items: [{ ...wireTable(), columns: [{ name: "x", label: "x", kind: "weird", nullable: false }] }] },
+    { items: [{ ...wireTable(), columns: "x" }] }, { items: [{ ...wireTable(), max_rows: "60" }] },
+  ];
+  for (const b of broken) assert.equal(logic.normalizeTables(b), null, JSON.stringify(b));
+});
+
+test("rows are checked against their table's column kinds", () => {
+  const t = radioTable();
+  const row = (extra = {}) => ({ id: 1, label: "Delta", slogan: "", stream_url: "https://a.example", official_link: null, sort_order: 2, is_active: true, ...extra });
+  assert.deepEqual(logic.normalizeRows({ items: [row()] }, t), [row()]);
+  for (const bad of [{ id: 0 }, { label: 5 }, { official_link: 5 }, { stream_url: null }, { sort_order: "2" }, { sort_order: 1.5 }, { is_active: 1 }]) {
+    assert.equal(logic.normalizeRows({ items: [row(bad)] }, t), null, JSON.stringify(bad));
+  }
+  assert.equal(logic.normalizeRows({ items: "x" }, t), null);
+  assert.deepEqual(logic.normalizeRows({ items: [] }, t), []);
+});
+
+test("cells read naturally", () => {
+  const [label, , , official, , active] = radioTable().columns;
+  assert.equal(logic.displayValue(label, "Delta"), "Delta");
+  assert.equal(logic.displayValue(official, null), "—");
+  assert.equal(logic.displayValue(active, true), "Ya");
+  assert.equal(logic.displayValue(active, false), "Tidak");
+  assert.match(logic.displayValue({ kind: "timestamp" }, "2026-10-22T00:30:00Z"), /2026/);
+  assert.equal(logic.displayValue({ kind: "int" }, 0), "0", "zero is shown, not a dash");
+});
+
+test("field checks follow the server's rules and say what is wrong", () => {
+  const [label, slogan, stream, official, order] = radioTable().columns;
+  assert.equal(logic.validateField(label, "  Delta  FM "), "");
+  assert.match(logic.validateField(label, "  "), /wajib/);
+  assert.match(logic.validateField(label, "x".repeat(81)), /paling banyak 80/);
+  assert.equal(logic.validateField(slogan, ""), "", "min 0 allows empty");
+  assert.equal(logic.validateField(official, ""), "", "nullable url may be empty");
+  assert.match(logic.validateField(stream, ""), /wajib/);
+  for (const bad of ["javascript:alert(1)", "ftp://a.example", "//a.example", "https://", "https://a b", "a.example", "/relative"]) {
+    assert.notEqual(logic.validateField(stream, bad), "", bad);
+  }
+  assert.equal(logic.validateField(stream, "https://a.example/x?y=1"), "");
+  assert.equal(logic.validateField(stream, "http://a.example"), "");
+  const route = { name: "link", label: "Tautan", kind: "route", nullable: false };
+  for (const ok of ["/profile", "/", "https://a.example"]) assert.equal(logic.validateField(route, ok), "", ok);
+  for (const bad of ["//evil.example", "/\\evil", "javascript:x", "", "/a b"]) assert.notEqual(logic.validateField(route, bad), "", bad);
+  assert.equal(logic.validateField(order, "-5"), "");
+  for (const bad of ["", "1.5", "abc", "1e3", "1000001", " "]) assert.notEqual(logic.validateField(order, bad), "", bad);
+  const date = { name: "d", label: "Tanggal", kind: "date", nullable: false };
+  assert.equal(logic.validateField(date, "2026-02-28"), "");
+  for (const bad of ["2026-13-01", "2026-1-1", "01/02/2026", "", "2026-10-32"]) assert.notEqual(logic.validateField(date, bad), "", bad);
+});
+
+test("drafts become request bodies with the right types and nulls", () => {
+  const t = radioTable();
+  assert.deepEqual(logic.emptyDraft(t), { label: "", slogan: "", stream_url: "", official_link: "", sort_order: "0", is_active: true });
+  const draft = { label: "  Delta   FM ", slogan: "", stream_url: " https://a.example ", official_link: "  ", sort_order: " 3 ", is_active: false };
+  assert.equal(logic.validateDraft(t, draft, true), "");
+  assert.deepEqual(logic.buildBody(t, draft, true), { label: "Delta FM", slogan: "", stream_url: "https://a.example", official_link: null, sort_order: 3, is_active: false });
+  assert.match(logic.validateDraft(t, { ...draft, label: "" }, true), /Nama/);
+  const row = { id: 4, label: "Jak", slogan: "s", stream_url: "https://j.example", official_link: null, sort_order: -2, is_active: true };
+  assert.deepEqual(logic.draftFromRow(t, row), { label: "Jak", slogan: "s", stream_url: "https://j.example", official_link: "", sort_order: "-2", is_active: true });
+  assert.ok(!("id" in logic.buildBody(t, logic.draftFromRow(t, row), false)), "the key is never in the body");
+});
+
+test("a table whose key is chosen by the admin asks for it and sends it as a number", () => {
+  const t = { ...radioTable(), key: "number", keyLabel: "Nomor", keyGiven: true, columns: [radioTable().columns[0]] };
+  const draft = { number: " 6 ", label: "Baru" };
+  assert.equal(logic.validateDraft(t, draft, true), "");
+  assert.deepEqual(logic.buildBody(t, draft, true), { number: 6, label: "Baru" });
+  assert.deepEqual(logic.buildBody(t, draft, false), { label: "Baru" }, "never sent on update");
+  for (const bad of ["", "0", "-1", "1.5", "abc", "1234567890"]) assert.match(logic.validateDraft(t, { ...draft, number: bad }, true), /Nomor/, bad);
+  assert.equal(logic.validateDraft(t, { number: "", label: "x" }, false), "");
+});
+
+test("preset contents are ordered by position and checked", () => {
+  const raw = { items: [{ preset_id: 1, embience_id: 12, position: 1 }, { preset_id: 1, embience_id: 6, position: 0 }, { preset_id: 2, embience_id: 7, position: 0 }] };
+  const items = logic.normalizePresetItems(raw);
+  assert.deepEqual(logic.presetIds(items, 1), [6, 12]);
+  assert.deepEqual(logic.presetIds(items, 9), []);
+  for (const bad of [null, { items: [{ preset_id: 0, embience_id: 1, position: 0 }] }, { items: [{ preset_id: 1, embience_id: 1 }] }, { items: "x" }]) {
+    assert.equal(logic.normalizePresetItems(bad), null);
+  }
+  assert.equal(logic.downloadName("radio_stations", "csv"), "radio_stations.csv");
+  assert.equal(logic.downloadName("radio_stations", "json"), "radio_stations.json");
+  assert.equal(logic.downloadName("radio_stations", "../x"), "radio_stations.json");
+});
+
+test("history labels cover the generic table actions and targets", () => {
+  assert.equal(logic.targetLabel("bookmarks:5"), "Bookmark #5");
+  assert.equal(logic.targetLabel("embience_presets:2"), "Preset suara latar #2");
+  assert.equal(logic.targetLabel("radio_stations"), "Stasiun radio");
+  assert.equal(logic.targetLabel("unknown_table:5"), "unknown_table:5");
+  assert.equal(logic.actionLabel("table.insert"), "Tambah data");
+  assert.equal(logic.actionLabel("message.purge"), "Hapus permanen entri Guestbook");
+});
+
+// ------------------------------------------------------------ D6c: klien API
+
+test("data calls use the table and id in the path and never anything else", async () => {
+  const { api, f } = await signedIn((url, init) => (init.method === "GET" ? reply(200, url.includes("export") ? "x" : { items: [] }) : reply(init.method === "POST" && url.endsWith("/rows") ? 201 : 204, { id: 3 })));
+  await api.tables();
+  await api.tableRows("bookmarks", null, 50);
+  await api.tableRows("chat_messages", 12, 50);
+  await api.insertRow("bookmarks", { label: "a" });
+  await api.updateRow("bookmarks", 3, { label: "b" });
+  await api.deleteRow("bookmarks", 3);
+  await api.presetItems();
+  await api.setPresetItems(2, [3, 1]);
+  await api.purgeMessage(9);
+  assert.deepEqual(f.calls.map((c) => `${c.init.method} ${c.url}`), [
+    "GET /api/v1/admin/tables",
+    "GET /api/v1/admin/tables/bookmarks/rows?limit=50",
+    "GET /api/v1/admin/tables/chat_messages/rows?limit=50&before=12",
+    "POST /api/v1/admin/tables/bookmarks/rows",
+    "PUT /api/v1/admin/tables/bookmarks/rows/3",
+    "DELETE /api/v1/admin/tables/bookmarks/rows/3",
+    "GET /api/v1/admin/presets/items",
+    "PUT /api/v1/admin/presets/2/items",
+    "POST /api/v1/admin/messages/9/purge",
+  ]);
+  assert.deepEqual(JSON.parse(f.calls[7].init.body), { ids: [3, 1] });
+  assert.deepEqual(JSON.parse(f.calls[8].init.body), { confirm: "purge:9" });
+});
+
+test("table names that are not plain lowercase never reach the network", async () => {
+  const { api, f } = await signedIn(() => reply(200, { items: [] }));
+  for (const bad of ["", "Bookmarks", "../admin", "a/b", "a b", "x".repeat(41), null, undefined, 5, "bookmarks?x=1"]) {
+    await assert.rejects(() => api.tableRows(bad, null, 5), (e) => e instanceof ApiError && e.status === 400, String(bad));
+    await assert.rejects(() => api.exportTable(bad, "csv"), (e) => e.status === 400);
+  }
+  assert.equal(f.calls.length, 0);
+});
+
+test("export reads the file as text and only ever asks for json or csv", async () => {
+  const text = "id,label\r\n1,a\r\n";
+  const { api, f } = await signedIn((url) => url.endsWith("login")
+    ? reply(200, goodOverview())
+    : { ok: true, status: 200, headers: { get: () => null }, text: async () => text, json: async () => { throw new Error("no json"); } });
+  assert.equal(await api.exportTable("bookmarks", "csv"), text);
+  await api.exportTable("bookmarks", "json");
+  await api.exportTable("bookmarks", "xml; DROP");
+  assert.deepEqual(f.calls.map((c) => c.url), [
+    "/api/v1/admin/tables/bookmarks/export?format=csv",
+    "/api/v1/admin/tables/bookmarks/export?format=json",
+    "/api/v1/admin/tables/bookmarks/export?format=json",
+  ]);
+});
+
+test("the data tab keeps every table decision on the server", () => {
+  const src = read(admin, "data.js");
+  assert.doesNotMatch(src, /"(generations|bookmarks|radio_stations|admin_audit|journal_[a-z_]+)"/, "no table list in the page");
+  assert.equal([...src.matchAll(/"chat_messages"/g)].length, 1, "one hint pointing to the Guestbook tab");
+  assert.match(src, /embience_presets/, "only the preset editor is special-cased");
+  assert.equal([...src.matchAll(/"embience[a-z_]*"/g)].length, 2, "just the preset table name and the embience list the preset editor needs");
 });

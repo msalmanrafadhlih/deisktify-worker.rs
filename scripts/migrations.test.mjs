@@ -85,6 +85,33 @@ test("seeds load, are idempotent, and keep references intact", () => {
   assert.equal(busy.names, "City|Train|Coffee Shop");
 });
 
+test("content seed applies once: deletions and edits made later are never undone", () => {
+  const content = sqlFiles("seeds").find((f) => f.name === "0001_content.sql").sql;
+  const db = freshDb();
+  db.exec(content);
+  assert.equal(count(db, "bookmarks"), 3);
+  assert.equal(count(db, "_seeded"), 1);
+  db.exec("DELETE FROM bookmarks WHERE id = 1; DELETE FROM radio_stations; DELETE FROM embience_preset_items; DELETE FROM embience_presets WHERE id = 2");
+  db.exec("UPDATE generations SET label = 'Edited' WHERE number = 1");
+  db.exec(content);
+  assert.equal(count(db, "bookmarks"), 2, "deleted bookmark stays deleted");
+  assert.equal(count(db, "radio_stations"), 0, "an emptied table stays empty");
+  assert.equal(count(db, "embience_preset_items"), 0);
+  assert.equal(count(db, "embience_presets"), 2);
+  assert.equal(db.prepare("SELECT label FROM generations WHERE number = 1").get().label, "Edited");
+  assert.equal(count(db, "_seeded"), 1);
+});
+
+test("content seed on a database that already has content (the production case) only adds the marker", () => {
+  const content = sqlFiles("seeds").find((f) => f.name === "0001_content.sql").sql;
+  const db = freshDb();
+  db.exec("INSERT INTO bookmarks (id, label, url, sort_order) VALUES (1, 'Mine', 'https://mine.example', 0)");
+  db.exec(content);
+  assert.equal(db.prepare("SELECT label FROM bookmarks WHERE id = 1").get().label, "Mine", "INSERT OR IGNORE keeps existing rows");
+  assert.equal(count(db, "bookmarks"), 3);
+  assert.equal(count(db, "_seeded"), 1);
+});
+
 test("content seed is separate from the fake samples", () => {
   const files = sqlFiles("seeds").map((s) => s.name);
   assert.deepEqual(files, ["0001_content.sql", "0002_samples.sql"]);
@@ -708,4 +735,216 @@ test("D6b queries use bound parameters", () => {
   for (const name of ["admin_journal_snapshots", "admin_messages_list", "admin_journal_repos", "admin_journal_stack"]) {
     assert.match(sqlOf(name), /ORDER BY/, `${name} needs an explicit order`);
   }
+});
+
+// ---- D6c: editor data umum (SQL yang dibangun Rust, lewat berkas emas)
+
+const golden = JSON.parse(readFileSync(join(root, "crates/api/tests-data/tables_sql.json"), "utf8"));
+const editable = Object.entries(golden.tables).filter(([, t]) => t.editable);
+
+let sampleN = 0;
+function sampleValue(col, variant = 0) {
+  const n = ++sampleN;
+  switch (col.kind) {
+    case "text": return col.min === 0 && variant === 0 ? "" : `v${n}`;
+    case "url": return col.nullable && variant === 0 ? null : `https://e.example/${n}`;
+    case "route": return `/p${n}`;
+    case "int": return 7;
+    case "bool": return 1;
+    case "date": return "2026-01-02";
+    default: throw new Error(`no sample for ${col.kind}`);
+  }
+}
+const sampleRow = (t, variant = 0) => t.columns.map((c) => sampleValue(c, variant));
+const insertArgs = (t, key, values, cap) => [...(t.key_given ? [key] : []), ...values, cap];
+const run = (db, sql, ...args) => db.prepare(sql).all(...args).map((r) => ({ ...r }));
+
+test("golden file: every table is on the allowlist and has the full set of statements", () => {
+  assert.deepEqual(
+    Object.keys(golden.tables).sort(),
+    ["admin_audit", "bookmarks", "chat_messages", "embience_presets", "embiences", "generations", "journal_pinned_repos", "journal_stack", "radio_stations"],
+  );
+  assert.ok(!Object.keys(golden.tables).some((n) => /^_|admin_attempts|message_reports|journal_snapshots|journal_profile/.test(n) && n !== "admin_audit"));
+  for (const [name, t] of Object.entries(golden.tables)) {
+    for (const sql of [t.sql.list, t.sql.exists, t.sql.insert, t.sql.update, ...t.sql.delete]) {
+      assert.ok(!/[;']/.test(sql), `${name}: no literals or second statements: ${sql}`);
+    }
+  }
+});
+
+test("golden counts: one row with every table, matching the real counts", () => {
+  const db = seededDb();
+  const rows = run(db, golden.counts);
+  assert.equal(rows.length, 1);
+  for (const name of Object.keys(golden.tables)) assert.equal(rows[0][name], count(db, name), name);
+  assert.equal(rows[0].generations, 5);
+});
+
+for (const [name, t] of editable) {
+  test(`table editor SQL (${name}): add, list, change, delete against real SQLite`, () => {
+    const db = seededDb();
+    const cap = t.max_rows;
+    const before = count(db, name);
+    const key = t.key_given ? 900 : undefined;
+    const values = sampleRow(t, 1);
+    const added = run(db, t.sql.insert, ...insertArgs(t, key, values, cap));
+    assert.equal(added.length, 1);
+    const id = added[0][t.key];
+    if (t.key_given) assert.equal(id, 900);
+    assert.equal(count(db, name), before + 1);
+
+    const listed = run(db, t.sql.list, null, 500);
+    assert.equal(listed.length, before + 1);
+    assert.deepEqual(Object.keys(listed[0]), [t.key, ...t.columns.map((c) => c.name)], "key first, then columns in registry order");
+    const mine = listed.find((r) => r[t.key] === id);
+    t.columns.forEach((c, i) => assert.equal(mine[c.name], values[i], `${name}.${c.name}`));
+
+    assert.equal(run(db, t.sql.exists, id).length, 1);
+    assert.equal(run(db, t.sql.exists, 123456).length, 0);
+
+    const next = sampleRow(t, 1);
+    const changed = run(db, t.sql.update, id, ...next);
+    assert.equal(changed.length, 1);
+    assert.equal(run(db, t.sql.update, 123456, ...next).length, 0, "missing row");
+    const after = run(db, t.sql.list, null, 500).find((r) => r[t.key] === id);
+    t.columns.forEach((c, i) => assert.equal(after[c.name], next[i]));
+    assert.equal(count(db, name), before + 1, "update adds no rows");
+
+    // Hapus: pernyataan terakhir menentukan apakah baris ada.
+    let last;
+    for (const sql of t.sql.delete) last = run(db, sql, id);
+    assert.equal(last.length, 1);
+    assert.equal(count(db, name), before);
+    assert.equal(run(db, t.sql.delete.at(-1), id).length, 0);
+  });
+
+  test(`table editor SQL (${name}): the row cap is enforced inside the INSERT`, () => {
+    const db = seededDb();
+    const now = count(db, name);
+    const key = t.key_given ? 901 : undefined;
+    // Batas sama dengan jumlah sekarang: tidak ada baris yang masuk, dan itu bukan galat.
+    assert.deepEqual(run(db, t.sql.insert, ...insertArgs(t, key, sampleRow(t, 1), now)), []);
+    assert.equal(count(db, name), now);
+    assert.equal(run(db, t.sql.insert, ...insertArgs(t, key, sampleRow(t, 1), now + 1)).length, 1);
+    assert.deepEqual(run(db, t.sql.insert, ...insertArgs(t, t.key_given ? 902 : undefined, sampleRow(t, 1), now + 1)), []);
+  });
+
+  test(`table editor SQL (${name}): the database CHECKs still refuse what the API would refuse`, () => {
+    const db = seededDb();
+    const key = t.key_given ? 903 : undefined;
+    for (const [i, c] of t.columns.entries()) {
+      const bad = (() => {
+        switch (c.kind) {
+          case "text": return c.min > 0 ? "" : "x".repeat(c.max + 1);
+          case "url": return "javascript:alert(1)";
+          case "route": return "//evil.example";
+          case "bool": return 2;
+          case "date": return "not-a-date";
+          default: return null;
+        }
+      })();
+      if (bad === null) continue;
+      const values = sampleRow(t, 1);
+      values[i] = bad;
+      assert.throws(() => run(db, t.sql.insert, ...insertArgs(t, key, values, 99)), /CHECK constraint failed|NOT NULL/, `${name}.${c.name}`);
+    }
+  });
+}
+
+test("table editor SQL: unique labels and names are refused with a UNIQUE error", () => {
+  const db = seededDb();
+  for (const [name, col] of [["radio_stations", "label"], ["embiences", "name"], ["embience_presets", "label"]]) {
+    const t = golden.tables[name];
+    const existing = db.prepare(`SELECT ${col} AS v FROM ${name} LIMIT 1`).get().v;
+    const values = sampleRow(t, 1);
+    values[t.columns.findIndex((c) => c.name === col)] = existing;
+    assert.throws(() => run(db, t.sql.insert, ...insertArgs(t, undefined, values, 99)), /UNIQUE constraint failed/, name);
+  }
+  const g = golden.tables.generations;
+  assert.throws(() => run(db, g.sql.insert, ...insertArgs(g, 1, sampleRow(g, 1), 99)), /UNIQUE constraint failed: generations.number/);
+});
+
+test("table editor SQL: deleting an embience or a preset also removes its preset items", () => {
+  const db = seededDb();
+  const items = () => count(db, "embience_preset_items");
+  const start = items();
+  const emb = golden.tables.embiences.sql.delete;
+  assert.equal(emb.length, 2);
+  const used = db.prepare("SELECT embience_id AS id, count(*) AS n FROM embience_preset_items GROUP BY embience_id ORDER BY n DESC").get();
+  for (const sql of emb) run(db, sql, used.id);
+  assert.equal(items(), start - used.n);
+  assert.equal(db.prepare("SELECT count(*) AS n FROM embience_preset_items WHERE embience_id = ?").get(used.id).n, 0);
+  const pre = golden.tables.embience_presets.sql.delete;
+  const preset = db.prepare("SELECT preset_id AS id, count(*) AS n FROM embience_preset_items GROUP BY preset_id").get();
+  const mid = items();
+  for (const sql of pre) run(db, sql, preset.id);
+  assert.equal(items(), mid - preset.n);
+  assert.deepEqual(db.prepare("PRAGMA foreign_key_check").all(), []);
+});
+
+test("table editor SQL: paged tables page by key descending without gaps or repeats", () => {
+  const db = freshDb();
+  db.exec("DELETE FROM chat_messages");
+  for (let i = 1; i <= 7; i++) insertMsg(db, `u${i}`, `m${i}`, `2026-01-0${i}T00:00:00Z`);
+  const t = golden.tables.chat_messages;
+  assert.equal(t.paged, true);
+  const seen = [];
+  let cursor = null;
+  for (;;) {
+    const page = run(db, t.sql.list, cursor, 3);
+    if (!page.length) break;
+    seen.push(...page.map((r) => r.id));
+    cursor = page.at(-1).id;
+  }
+  assert.deepEqual(seen, [7, 6, 5, 4, 3, 2, 1]);
+  assert.ok(!Object.keys(run(db, t.sql.list, null, 1)[0]).some((k) => /avatar|attachment/.test(k)), "legacy columns are not exposed");
+  const audit = golden.tables.admin_audit;
+  assert.ok(!audit.columns.some((c) => c.name === "who"), "who is not exported");
+});
+
+test("table editor SQL: small tables list in display order", () => {
+  const db = seededDb();
+  const order = (name) => run(db, golden.tables[name].sql.list, null, 500).map((r) => r[golden.tables[name].key]);
+  assert.deepEqual(order("generations"), [5, 4, 3, 2, 1], "newest generation first");
+  assert.deepEqual(order("bookmarks"), run(db, "SELECT id FROM bookmarks ORDER BY sort_order, id").map((r) => r.id));
+  assert.deepEqual(order("embiences"), run(db, "SELECT id FROM embiences ORDER BY sort_order, id").map((r) => r.id));
+});
+
+test("preset items: replaced in the given order, listed by preset and position", () => {
+  const db = seededDb();
+  const list = () => run(db, sqlOf("admin_preset_items"));
+  assert.equal(list().length, 7);
+  assert.deepEqual(run(db, sqlOf("admin_preset_exists"), 2).length, 1);
+  assert.deepEqual(run(db, sqlOf("admin_preset_exists"), 99), []);
+  assert.equal(run(db, sqlOf("admin_embience_ids")).length, 12);
+  run(db, sqlOf("admin_preset_items_delete"), 3);
+  [[9, 0], [12, 1], [6, 2]].forEach(([e, p]) => run(db, sqlOf("admin_preset_item_insert"), 3, e, p));
+  assert.deepEqual(list().filter((r) => r.preset_id === 3).map((r) => r.embience_id), [9, 12, 6]);
+  assert.equal(list().filter((r) => r.preset_id === 1).length, 2, "other presets are untouched");
+  assert.throws(() => run(db, sqlOf("admin_preset_item_insert"), 3, 9, 5), /UNIQUE constraint failed/, "an embience appears once per preset");
+  assert.deepEqual(list().map((r) => r.preset_id), [...list().map((r) => r.preset_id)].sort((a, b) => a - b));
+});
+
+test("purge: only a hidden entry is removed, together with its reports", () => {
+  const db = freshDb();
+  db.exec("DELETE FROM chat_messages");
+  insertMsg(db, "a", "visible", "2026-01-01T00:00:00Z");
+  insertMsg(db, "b", "hidden", "2026-01-02T00:00:00Z");
+  const ids = Object.fromEntries(["a", "b"].map((u) => [u, db.prepare("SELECT id FROM chat_messages WHERE username = ?").get(u).id]));
+  const id = (u) => ids[u];
+  db.prepare("UPDATE chat_messages SET deleted_at = '2026-01-03T00:00:00Z' WHERE id = ?").run(id("b"));
+  const report = db.prepare("INSERT INTO message_reports (message_id, reporter, created_at) VALUES (?, ?, '2026-01-03T00:00:00Z')");
+  report.run(id("a"), "r1");
+  report.run(id("b"), "r1");
+  report.run(id("b"), "r2");
+  // Dalam satu transaksi, urutan seperti di Rust: entri dulu, lalu laporan yatim.
+  const purge = (n) => [run(db, sqlOf("admin_message_purge"), n), run(db, sqlOf("admin_message_purge_reports"), n)];
+  assert.deepEqual(purge(id("a"))[0], [], "a visible entry cannot be purged");
+  assert.equal(count(db, "chat_messages"), 2);
+  assert.equal(count(db, "message_reports"), 3, "its reports are kept too");
+  assert.equal(purge(id("b"))[0].length, 1);
+  assert.equal(count(db, "chat_messages"), 1);
+  assert.equal(db.prepare("SELECT count(*) AS n FROM message_reports WHERE message_id = ?").get(id("b")).n, 0);
+  assert.equal(count(db, "message_reports"), 1, "only the purged entry's reports are gone");
+  assert.deepEqual(purge(999)[0], []);
 });

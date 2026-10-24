@@ -87,6 +87,24 @@ pub mod paths {
     /// `DELETE`: tolak (hapus) semua laporan sebuah entri. Templat rute Axum.
     pub const ADMIN_MESSAGE_REPORTS: &str = "/api/v1/admin/messages/{id}/reports";
 
+    // ---- D6c: editor data umum
+    /// `GET`: daftar tabel yang boleh dikelola beserta skema dan jumlah barisnya.
+    pub const ADMIN_TABLES: &str = "/api/v1/admin/tables";
+    /// `GET` baris (`?before=<kunci>&limit=<n>` untuk tabel berhalaman), `POST` tambah
+    /// baris → `201 {"id"}`. Templat rute Axum.
+    pub const ADMIN_TABLE_ROWS: &str = "/api/v1/admin/tables/{table}/rows";
+    /// `PUT` ubah, `DELETE` hapus satu baris. Templat rute Axum.
+    pub const ADMIN_TABLE_ROW: &str = "/api/v1/admin/tables/{table}/rows/{id}";
+    /// `GET`: ekspor (`?format=json|csv`) sebagai berkas unduhan. Templat rute Axum.
+    pub const ADMIN_TABLE_EXPORT: &str = "/api/v1/admin/tables/{table}/export";
+    /// `GET`: isi semua preset suara latar (`{"items":[{preset_id,embience_id,position}]}`).
+    pub const ADMIN_PRESET_ITEMS: &str = "/api/v1/admin/presets/items";
+    /// `PUT`: ganti isi satu preset (`{"ids":[embience...]}`, urutan = urutan putar).
+    pub const ADMIN_PRESET_ITEMS_SET: &str = "/api/v1/admin/presets/{id}/items";
+    /// `POST`: hapus permanen entri Guestbook yang sudah disembunyikan
+    /// (`{"confirm":"purge:<id>"}`). Templat rute Axum.
+    pub const ADMIN_MESSAGE_PURGE: &str = "/api/v1/admin/messages/{id}/purge";
+
     /// Semua path; tambahkan endpoint baru di sini juga supaya test prefix mencakupnya.
     pub const ALL: &[&str] = &[
         HEALTH,
@@ -115,6 +133,13 @@ pub mod paths {
         ADMIN_MESSAGES,
         ADMIN_MESSAGE_RESTORE,
         ADMIN_MESSAGE_REPORTS,
+        ADMIN_TABLES,
+        ADMIN_TABLE_ROWS,
+        ADMIN_TABLE_ROW,
+        ADMIN_TABLE_EXPORT,
+        ADMIN_PRESET_ITEMS,
+        ADMIN_PRESET_ITEMS_SET,
+        ADMIN_MESSAGE_PURGE,
     ];
 
     /// Path `POST` untuk melaporkan entri `id`.

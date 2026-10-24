@@ -13,8 +13,9 @@
 //   0002_samples.sql  contoh chat dan contoh snapshot jurnal
 //                     (hanya untuk dev/demo; dijalankan dengan `--samples`)
 //
-// Semua INSERT memakai `INSERT OR IGNORE` dengan id eksplisit, jadi menjalankan
-// ulang seed tidak menggandakan baris dan tidak menimpa data yang sudah diubah.
+// Semua INSERT memakai `INSERT OR IGNORE` dengan id eksplisit. Seed konten juga hanya
+// berlaku sekali (penanda `_seeded`), supaya baris yang dihapus lewat dashboard tidak
+// dikembalikan; contoh (0002) boleh diulang karena hanya untuk lokal.
 // Berkas dibangkitkan; jangan diedit tangan, jalankan ulang skrip ini.
 
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
@@ -60,6 +61,22 @@ function insert(table, columns, rows) {
   if (rows.length === 0) return `-- (no rows for ${table})\n`;
   const values = rows.map((r) => `    (${r.join(", ")})`).join(",\n");
   return `INSERT OR IGNORE INTO ${table} (${columns.join(", ")}) VALUES\n${values};\n`;
+}
+
+// Seed konten hanya berlaku SEKALI. Sejak D6c konten situs dikelola lewat dashboard,
+// dan seed dijalankan ulang tiap rilis; tanpa penanda, baris yang dihapus admin akan
+// hidup lagi. Penanda `_seeded` ditulis di akhir transaksi yang sama dengan isinya.
+const ONCE = "content";
+
+function insertOnce(table, columns, rows) {
+  if (rows.length === 0) return `-- (no rows for ${table})\n`;
+  const values = rows.map((r) => `    (${r.join(", ")})`).join(",\n");
+  const cols = columns.map((_, i) => `column${i + 1}`).join(", ");
+  return (
+    `INSERT OR IGNORE INTO ${table} (${columns.join(", ")})\n` +
+    `SELECT ${cols} FROM (VALUES\n${values})\n` +
+    `WHERE NOT EXISTS (SELECT 1 FROM _seeded WHERE name = '${ONCE}');\n`
+  );
 }
 
 const HEADER = (title) =>
@@ -142,19 +159,27 @@ embience.presets.forEach((p, i) => {
 });
 
 const content =
-  HEADER("Seed konten situs: generations, bookmarks, radio, embience.") +
+  HEADER("Seed konten situs: generations, bookmarks, radio, embience.").replace(
+    "-- Aman dijalankan berulang kali (INSERT OR IGNORE dengan id eksplisit).",
+    "-- HANYA BERLAKU SEKALI: setelah penanda `_seeded` ada, menjalankannya lagi tidak mengubah apa pun,\n-- jadi baris yang dihapus atau diubah lewat dashboard tidak dikembalikan.",
+  ) +
+  "CREATE TABLE IF NOT EXISTS _seeded (\n" +
+  "    name TEXT PRIMARY KEY,\n" +
+  "    at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))\n" +
+  ");\n\n" +
   "-- generations\n" +
-  insert("generations", ["number", "label", "link", "kernel", "built_on"], generationRows) +
+  insertOnce("generations", ["number", "label", "link", "kernel", "built_on"], generationRows) +
   "\n-- bookmarks\n" +
-  insert("bookmarks", ["id", "label", "url", "sort_order"], bookmarkRows) +
+  insertOnce("bookmarks", ["id", "label", "url", "sort_order"], bookmarkRows) +
   "\n-- radio_stations\n" +
-  insert("radio_stations", ["id", "label", "slogan", "stream_url", "official_link", "image_url", "sort_order", "is_active"], radioRows) +
+  insertOnce("radio_stations", ["id", "label", "slogan", "stream_url", "official_link", "image_url", "sort_order", "is_active"], radioRows) +
   "\n-- embiences\n" +
-  insert("embiences", ["id", "name", "icon_url", "stream_url", "sort_order"], embienceRows) +
+  insertOnce("embiences", ["id", "name", "icon_url", "stream_url", "sort_order"], embienceRows) +
   "\n-- embience_presets\n" +
-  insert("embience_presets", ["id", "label", "sort_order"], presetRows) +
+  insertOnce("embience_presets", ["id", "label", "sort_order"], presetRows) +
   "\n-- embience_preset_items\n" +
-  insert("embience_preset_items", ["preset_id", "embience_id", "position"], itemRows);
+  insertOnce("embience_preset_items", ["preset_id", "embience_id", "position"], itemRows) +
+  `\nINSERT OR IGNORE INTO _seeded (name) VALUES ('${ONCE}');\n`;
 
 // ------------------------------------------------------------------ contoh
 

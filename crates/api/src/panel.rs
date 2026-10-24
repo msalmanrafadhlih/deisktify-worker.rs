@@ -92,6 +92,23 @@ impl From<ContentError> for PanelError {
     }
 }
 
+/// Galat tulis dari database: pelanggaran UNIQUE (nama atau kunci kembar) menjadi
+/// `Conflict`; selain itu tetap galat database.
+pub fn write_error(e: Error) -> PanelError {
+    let unique = match &e {
+        Error::Sql { message, code } | Error::Step { message, code, .. } => {
+            message.contains("UNIQUE constraint failed")
+                || code.as_deref().is_some_and(|c| c.contains("UNIQUE"))
+        }
+        _ => false,
+    };
+    if unique {
+        PanelError::Conflict
+    } else {
+        PanelError::Db(e)
+    }
+}
+
 // ------------------------------------------------------------------ pembatas
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

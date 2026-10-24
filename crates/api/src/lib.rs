@@ -29,6 +29,7 @@ pub mod journal_admin;
 pub mod moderation;
 pub mod panel;
 pub mod routes;
+pub mod tables;
 pub mod time;
 
 #[cfg(test)]
@@ -121,6 +122,31 @@ pub fn app(config: Arc<Config>) -> Router {
         .route(
             api_types::paths::ADMIN_MESSAGE_REPORTS,
             delete(routes::admin_message_dismiss),
+        )
+        .route(api_types::paths::ADMIN_TABLES, get(routes::admin_tables))
+        .route(
+            api_types::paths::ADMIN_TABLE_ROWS,
+            get(routes::admin_table_rows).post(routes::admin_table_insert),
+        )
+        .route(
+            api_types::paths::ADMIN_TABLE_ROW,
+            put(routes::admin_table_update).delete(routes::admin_table_delete),
+        )
+        .route(
+            api_types::paths::ADMIN_TABLE_EXPORT,
+            get(routes::admin_table_export),
+        )
+        .route(
+            api_types::paths::ADMIN_PRESET_ITEMS,
+            get(routes::admin_preset_items),
+        )
+        .route(
+            api_types::paths::ADMIN_PRESET_ITEMS_SET,
+            put(routes::admin_preset_items_set),
+        )
+        .route(
+            api_types::paths::ADMIN_MESSAGE_PURGE,
+            post(routes::admin_message_purge),
         )
         .fallback(error::not_found)
         .method_not_allowed_fallback(error::method_not_allowed)
@@ -827,7 +853,7 @@ mod tests {
     /// Path (dengan `{id}` diisi 1) dan metode yang diizinkan.
     fn editor_paths() -> Vec<(String, Vec<Method>)> {
         use api_types::paths as p;
-        let fill = |path: &str| path.replace("{id}", "1");
+        let fill = |path: &str| path.replace("{id}", "1").replace("{table}", "bookmarks");
         vec![
             (fill(p::ADMIN_JOURNAL), vec![Method::GET]),
             (fill(p::ADMIN_JOURNAL_PROFILE), vec![Method::PUT]),
@@ -846,6 +872,13 @@ mod tests {
             (fill(p::ADMIN_MESSAGES), vec![Method::GET]),
             (fill(p::ADMIN_MESSAGE_RESTORE), vec![Method::POST]),
             (fill(p::ADMIN_MESSAGE_REPORTS), vec![Method::DELETE]),
+            (fill(p::ADMIN_TABLES), vec![Method::GET]),
+            (fill(p::ADMIN_TABLE_ROWS), vec![Method::GET, Method::POST]),
+            (fill(p::ADMIN_TABLE_ROW), vec![Method::PUT, Method::DELETE]),
+            (fill(p::ADMIN_TABLE_EXPORT), vec![Method::GET]),
+            (fill(p::ADMIN_PRESET_ITEMS), vec![Method::GET]),
+            (fill(p::ADMIN_PRESET_ITEMS_SET), vec![Method::PUT]),
+            (fill(p::ADMIN_MESSAGE_PURGE), vec![Method::POST]),
         ]
     }
 

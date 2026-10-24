@@ -8,7 +8,27 @@ import { ConfirmButton, Messages } from "./parts.js";
 
 const PAGE = 30;
 
-function Entry({ m, busy, onHide, onRestore, onDismiss }) {
+/** Hapus permanen: harus mengetik id entri dulu (tidak ada tombol sekali klik). */
+function PurgeButton({ id, busy, onPurge }) {
+  const [open, setOpen] = useState(false);
+  const [typed, setTyped] = useState("");
+  if (!open) {
+    return html`<button type="button" class="small danger" disabled=${busy} onClick=${() => setOpen(true)}>Hapus permanen…</button>`;
+  }
+  const ready = typed.trim() === String(id);
+  return html`
+    <form class="purge" onSubmit=${(e) => { e.preventDefault(); if (ready) onPurge(); }}>
+      <label for=${`purge-${id}`}>Entri dan laporannya dihapus selamanya dan tidak bisa dikembalikan. Ketik <strong>${id}</strong> untuk melanjutkan.</label>
+      <div class="actions">
+        <input id=${`purge-${id}`} value=${typed} inputmode="numeric" autocomplete="off" onInput=${(e) => setTyped(e.currentTarget.value)} />
+        <button type="submit" class="small danger solid" disabled=${busy || !ready}>Hapus permanen</button>
+        <button type="button" class="small" onClick=${() => { setOpen(false); setTyped(""); }}>Batal</button>
+      </div>
+    </form>
+  `;
+}
+
+function Entry({ m, busy, onHide, onRestore, onDismiss, onPurge }) {
   const hidden = m.hiddenAt !== null;
   return html`
     <li class=${hidden ? "entry is-hidden" : "entry"}>
@@ -25,6 +45,7 @@ function Entry({ m, busy, onHide, onRestore, onDismiss }) {
       <div class="actions">
         ${!hidden && html`<${ConfirmButton} label="Sembunyikan" confirmLabel="Ya, sembunyikan" disabled=${busy} onConfirm=${onHide} />`}
         ${hidden && html`<button type="button" class="small" disabled=${busy} onClick=${onRestore}>Tampilkan lagi</button>`}
+        ${hidden && html`<${PurgeButton} id=${m.id} busy=${busy} onPurge=${onPurge} />`}
         ${m.reports > 0 && html`<${ConfirmButton} label="Tolak laporan" confirmLabel="Ya, tolak laporan" danger=${false} disabled=${busy} onConfirm=${onDismiss} />`}
       </div>
     </li>
@@ -118,6 +139,7 @@ export function Guestbook({ api, onFail }) {
               onHide=${() => act(() => api.hideMessage(m.id), `Entri #${m.id} disembunyikan.`)}
               onRestore=${() => act(() => api.restoreMessage(m.id), `Entri #${m.id} ditampilkan lagi.`)}
               onDismiss=${() => act(() => api.dismissReports(m.id), `Laporan entri #${m.id} ditolak.`)}
+              onPurge=${() => act(() => api.purgeMessage(m.id), `Entri #${m.id} dihapus permanen.`)}
             />
           `,
         )}

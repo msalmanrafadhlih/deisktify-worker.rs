@@ -120,3 +120,17 @@ form label { display: grid; gap: 4px; }
 .flags { display: flex; gap: 6px; flex-wrap: wrap; }
 .flag { font-size: .8rem; border: 1px solid var(--line); border-radius: 999px; padding: 1px 10px; color: var(--muted); }
 .flag.warn { color: var(--notice); border-color: var(--notice); }
+
+.scroll { overflow-x: auto; background: var(--card); border: 1px solid var(--line); border-radius: 12px; margin-bottom: 12px; }
+table.data { min-width: 36rem; }
+table.data th, table.data td { padding: .5rem .7rem; vertical-align: top; }
+td.cell { max-width: 20rem; overflow-wrap: anywhere; }
+td.actions-cell { white-space: nowrap; }
+.count { font-size: .8rem; opacity: .75; margin-left: .25rem; }
+.card.form { display: grid; gap: 10px; margin-bottom: 12px; }
+label.check { display: flex; gap: 8px; align-items: center; font-weight: 600; }
+label.check input { width: auto; min-height: 0; }
+select { font: inherit; padding: .6rem .75rem; border-radius: 8px; border: 1px solid var(--line); background: var(--card); color: var(--text); min-height: 44px; width: 100%; }
+form.purge { display: grid; gap: 6px; width: 100%; padding: 8px; border: 1px dashed var(--danger); border-radius: 8px; }
+form.purge input { max-width: 8rem; }
+ol.rows { list-style: none; margin: 0; padding: 0; }

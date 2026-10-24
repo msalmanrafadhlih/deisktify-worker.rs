@@ -35,6 +35,12 @@ const ACTION_LABELS = {
   "journal.stack.edit": "Ubah item stack",
   "journal.stack.delete": "Hapus item stack",
   "journal.stack.order": "Ubah urutan stack",
+  "table.insert": "Tambah data",
+  "table.update": "Ubah data",
+  "table.delete": "Hapus data",
+  "table.export": "Ekspor data",
+  "preset.items": "Ubah isi preset suara latar",
+  "message.purge": "Hapus permanen entri Guestbook",
 };
 
 export function tableLabel(name) {
@@ -49,9 +55,15 @@ export function actionLabel(action) {
 export function targetLabel(target) {
   if (target == null || target === "") return "";
   const m = /^(message|repo|stack|github):(.+)$/.exec(target);
-  if (!m) return String(target);
-  const kind = { message: "Entri #", repo: "Repo ", stack: "Stack ", github: "Akun " }[m[1]];
-  return kind + m[2];
+  if (m) {
+    const kind = { message: "Entri #", repo: "Repo ", stack: "Stack ", github: "Akun " }[m[1]];
+    return kind + m[2];
+  }
+  // `tabel:kunci` (mis. `bookmarks:5`) atau nama tabel saja (ekspor).
+  const t = /^([a-z_]+):(\d+)$/.exec(target);
+  if (t && t[1] in TABLE_LABELS) return `${TABLE_LABELS[t[1]]} #${t[2]}`;
+  if (target in TABLE_LABELS) return TABLE_LABELS[target];
+  return String(target);
 }
 
 export function whoLabel(who, me) {
@@ -284,4 +296,204 @@ export function normalizeMessages(raw) {
         }
       : null,
   );
+}
+
+// -------------------------------------------------------- Data (D6c)
+
+const KINDS = ["text", "url", "route", "int", "bool", "date", "timestamp"];
+
+/** Daftar tabel dari server -> bentuk tampil, atau `null` jika rusak. */
+export function normalizeTables(raw) {
+  if (!isObj(raw)) return null;
+  return list(raw.items, (t) => {
+    if (!isObj(t) || typeof t.name !== "string" || !/^[a-z_]{1,40}$/.test(t.name)) return null;
+    if (text(t.label) === null || text(t.key) === null || text(t.key_label) === null) return null;
+    if (typeof t.editable !== "boolean" || typeof t.key_given !== "boolean" || typeof t.paged !== "boolean") return null;
+    if (count(t.max_rows) === null || count(t.rows) === null) return null;
+    const columns = list(t.columns, (c) =>
+      isObj(c) &&
+      text(c.name) !== null &&
+      text(c.label) !== null &&
+      KINDS.includes(c.kind) &&
+      typeof c.nullable === "boolean" &&
+      (c.min === undefined || Number.isSafeInteger(c.min)) &&
+      (c.max === undefined || Number.isSafeInteger(c.max))
+        ? { name: c.name, label: c.label, kind: c.kind, nullable: c.nullable, min: c.min ?? null, max: c.max ?? null }
+        : null,
+    );
+    if (!columns) return null;
+    return {
+      name: t.name,
+      label: t.label,
+      editable: t.editable,
+      key: t.key,
+      keyLabel: t.key_label,
+      keyGiven: t.key_given,
+      paged: t.paged,
+      maxRows: t.max_rows,
+      rows: t.rows,
+      columns,
+    };
+  });
+}
+
+function cellOk(kind, nullable, v) {
+  if (v === null) return nullable;
+  if (kind === "int") return Number.isSafeInteger(v);
+  if (kind === "bool") return typeof v === "boolean";
+  return typeof v === "string";
+}
+
+/** Baris sebuah tabel dari server, dicek menurut skemanya. `null` jika ada yang rusak. */
+export function normalizeRows(raw, table) {
+  if (!isObj(raw)) return null;
+  return list(raw.items, (r) => {
+    if (!isObj(r) || !isId(r[table.key])) return null;
+    const row = { [table.key]: r[table.key] };
+    for (const c of table.columns) {
+      if (!cellOk(c.kind, c.nullable, r[c.name])) return null;
+      row[c.name] = r[c.name];
+    }
+    return row;
+  });
+}
+
+/** Teks sel untuk layar. */
+export function displayValue(col, value) {
+  if (value === null || value === undefined) return "—";
+  if (col.kind === "bool") return value ? "Ya" : "Tidak";
+  if (col.kind === "timestamp") return formatLocal(value);
+  return String(value);
+}
+
+const URL_RE = /^https?:\/\/[^\s/]\S*$/;
+
+/** Pesan masalah untuk satu isian ("" jika baik). Aturan sama dengan server. */
+export function validateField(col, raw) {
+  const label = col.label;
+  switch (col.kind) {
+    case "text": {
+      const v = squash(raw);
+      if (v === "" && col.nullable) return "";
+      const n = [...v].length;
+      if (n === 0 && (col.min ?? 0) > 0) return `${label} wajib diisi.`;
+      if (n < (col.min ?? 0)) return `${label} paling sedikit ${col.min} karakter.`;
+      if (n > (col.max ?? Infinity)) return `${label} paling banyak ${col.max} karakter.`;
+      return "";
+    }
+    case "url":
+    case "route": {
+      const v = String(raw ?? "").trim();
+      if (v === "" && col.nullable) return "";
+      if (v === "") return `${label} wajib diisi.`;
+      if (v.length > 2048) return `${label} terlalu panjang.`;
+      if (URL_RE.test(v)) return "";
+      if (col.kind === "route" && /^\/(?![/\\])\S*$/.test(v)) return "";
+      return col.kind === "route"
+        ? `${label} harus berupa rute (/halaman) atau alamat http(s)://.`
+        : `${label} harus berupa alamat http:// atau https://.`;
+    }
+    case "int": {
+      const v = String(raw ?? "").trim();
+      if (!/^-?\d{1,15}$/.test(v)) return `${label} harus berupa bilangan bulat.`;
+      const n = Number(v);
+      if (n < (col.min ?? -Infinity) || n > (col.max ?? Infinity)) return `${label} harus antara ${col.min} dan ${col.max}.`;
+      return "";
+    }
+    case "date": {
+      const v = String(raw ?? "").trim();
+      const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(v);
+      if (!m || Number(m[2]) < 1 || Number(m[2]) > 12 || Number(m[3]) < 1 || Number(m[3]) > 31) return `${label} harus berformat TTTT-BB-HH.`;
+      return "";
+    }
+    default:
+      return "";
+  }
+}
+
+/** Masalah pertama dari seluruh isian (termasuk kunci yang ditentukan pengisi), atau "". */
+export function validateDraft(table, draft, creating) {
+  if (creating && table.keyGiven) {
+    const n = String(draft[table.key] ?? "").trim();
+    if (!/^\d{1,9}$/.test(n) || Number(n) < 1) return `${table.keyLabel} harus bilangan bulat 1 atau lebih.`;
+  }
+  for (const c of table.columns) {
+    if (c.kind === "bool") continue;
+    const why = validateField(c, draft[c.name]);
+    if (why) return why;
+  }
+  return "";
+}
+
+/** Draf awal untuk baris baru. */
+export function emptyDraft(table) {
+  const draft = {};
+  if (table.keyGiven) draft[table.key] = "";
+  for (const c of table.columns) draft[c.name] = c.kind === "bool" ? true : c.kind === "int" ? "0" : "";
+  return draft;
+}
+
+/** Draf dari baris yang ada (semua dijadikan teks, kecuali bool). */
+export function draftFromRow(table, row) {
+  const draft = {};
+  for (const c of table.columns) {
+    const v = row[c.name];
+    draft[c.name] = c.kind === "bool" ? v === true : v === null || v === undefined ? "" : String(v);
+  }
+  return draft;
+}
+
+/** Badan permintaan tambah/ubah dari draf yang sudah divalidasi. */
+export function buildBody(table, draft, creating) {
+  const body = {};
+  if (creating && table.keyGiven) body[table.key] = Number(String(draft[table.key]).trim());
+  for (const c of table.columns) {
+    const v = draft[c.name];
+    switch (c.kind) {
+      case "text": {
+        const t = squash(v);
+        body[c.name] = t === "" && c.nullable ? null : t;
+        break;
+      }
+      case "url":
+      case "route":
+      case "date": {
+        const t = String(v ?? "").trim();
+        body[c.name] = t === "" && c.nullable ? null : t;
+        break;
+      }
+      case "int":
+        body[c.name] = Number(String(v).trim());
+        break;
+      case "bool":
+        body[c.name] = v === true;
+        break;
+      default:
+        break;
+    }
+  }
+  return body;
+}
+
+/** Isi satu preset: id embience urut menurut posisi. */
+export function presetIds(items, presetId) {
+  return items
+    .filter((i) => i.presetId === presetId)
+    .sort((a, b) => a.position - b.position)
+    .map((i) => i.embienceId);
+}
+
+/** Isi semua preset dari server, atau `null` jika rusak. */
+export function normalizePresetItems(raw) {
+  if (!isObj(raw)) return null;
+  return list(raw.items, (i) =>
+    isObj(i) && isId(i.preset_id) && isId(i.embience_id) && count(i.position) !== null
+      ? { presetId: i.preset_id, embienceId: i.embience_id, position: i.position }
+      : null,
+  );
+}
+
+/** Menyimpan teks sebagai berkas unduhan (dipakai tombol Ekspor). */
+export function downloadName(table, format) {
+  return `${table}.${format === "csv" ? "csv" : "json"}`;
 }

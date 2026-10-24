@@ -21,9 +21,21 @@ export const PATHS = {
   message: "/api/v1/admin/messages/{id}",
   messageRestore: "/api/v1/admin/messages/{id}/restore",
   messageReports: "/api/v1/admin/messages/{id}/reports",
+  tables: "/api/v1/admin/tables",
+  tableRows: "/api/v1/admin/tables/{table}/rows",
+  tableRow: "/api/v1/admin/tables/{table}/rows/{id}",
+  tableExport: "/api/v1/admin/tables/{table}/export",
+  presetItems: "/api/v1/admin/presets/items",
+  presetItemsSet: "/api/v1/admin/presets/{id}/items",
+  messagePurge: "/api/v1/admin/messages/{id}/purge",
 };
 
 /** Mengisi `{id}`; id selain bilangan bulat positif ditolak sebelum menyentuh jaringan. */
+export function withTable(template, table) {
+  if (typeof table !== "string" || !/^[a-z_]{1,40}$/.test(table)) throw new ApiError(400);
+  return template.replace("{table}", table);
+}
+
 export function withId(template, id) {
   if (!isId(id)) throw new ApiError(400);
   return template.replace("{id}", String(id));
@@ -43,7 +55,7 @@ export class ApiError extends Error {
 export function createApi(fetchFn) {
   let token = null;
 
-  async function request(method, path, { query, body } = {}) {
+  async function request(method, path, { query, body, as = "json" } = {}) {
     if (!token) throw new ApiError(401);
     const qs = query ? `?${new URLSearchParams(query)}` : "";
     const headers = { authorization: `Bearer ${token}` };
@@ -61,7 +73,7 @@ export function createApi(fetchFn) {
     if (!res.ok) throw new ApiError(res.status, parseRetryAfter(res.headers.get("retry-after")));
     if (res.status === 204) return null;
     try {
-      return await res.json();
+      return as === "text" ? await res.text() : await res.json();
     } catch {
       throw new ApiError(500);
     }
@@ -103,12 +115,30 @@ export function createApi(fetchFn) {
     deleteStack: async (id) => request("DELETE", withId(PATHS.journalStackItem, id)),
     orderStack: (ids) => request("PUT", PATHS.journalStackOrder, { body: { ids } }),
 
+    // Data
+    tables: () => request("GET", PATHS.tables),
+    tableRows: async (table, before, limit) => {
+      const query = { limit: String(limit) };
+      if (before != null) query.before = String(before);
+      return request("GET", withTable(PATHS.tableRows, table), { query });
+    },
+    insertRow: async (table, body) => request("POST", withTable(PATHS.tableRows, table), { body }),
+    updateRow: async (table, id, body) => request("PUT", withId(withTable(PATHS.tableRow, table), id), { body }),
+    deleteRow: async (table, id) => request("DELETE", withId(withTable(PATHS.tableRow, table), id)),
+    /** Isi berkas ekspor sebagai teks (`json` atau `csv`). */
+    exportTable: async (table, format) =>
+      request("GET", withTable(PATHS.tableExport, table), { query: { format: format === "csv" ? "csv" : "json" }, as: "text" }),
+    presetItems: () => request("GET", PATHS.presetItems),
+    setPresetItems: async (id, ids) => request("PUT", withId(PATHS.presetItemsSet, id), { body: { ids } }),
+
     // Guestbook
     messages: (filter, before, limit) => {
       const query = { filter, limit: String(limit) };
       if (before != null) query.before = String(before);
       return request("GET", PATHS.messages, { query });
     },
+    purgeMessage: async (id) =>
+      request("POST", withId(PATHS.messagePurge, id), { body: { confirm: `purge:${id}` } }),
     hideMessage: async (id) => request("DELETE", withId(PATHS.message, id)),
     restoreMessage: async (id) => request("POST", withId(PATHS.messageRestore, id)),
     dismissReports: async (id) => request("DELETE", withId(PATHS.messageReports, id)),

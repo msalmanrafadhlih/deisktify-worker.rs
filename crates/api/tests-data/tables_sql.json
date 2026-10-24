@@ -1,0 +1,400 @@
+{
+  "counts": "SELECT (SELECT count(*) FROM generations) AS generations, (SELECT count(*) FROM bookmarks) AS bookmarks, (SELECT count(*) FROM radio_stations) AS radio_stations, (SELECT count(*) FROM embiences) AS embiences, (SELECT count(*) FROM embience_presets) AS embience_presets, (SELECT count(*) FROM chat_messages) AS chat_messages, (SELECT count(*) FROM admin_audit) AS admin_audit, (SELECT count(*) FROM journal_pinned_repos) AS journal_pinned_repos, (SELECT count(*) FROM journal_stack) AS journal_stack",
+  "tables": {
+    "admin_audit": {
+      "columns": [
+        {
+          "kind": "timestamp",
+          "max": null,
+          "min": null,
+          "name": "at",
+          "nullable": false
+        },
+        {
+          "kind": "text",
+          "max": 40,
+          "min": 1,
+          "name": "action",
+          "nullable": false
+        },
+        {
+          "kind": "text",
+          "max": 120,
+          "min": 1,
+          "name": "target",
+          "nullable": true
+        }
+      ],
+      "editable": false,
+      "key": "id",
+      "key_given": false,
+      "max_rows": 0,
+      "paged": true,
+      "sql": {
+        "delete": [
+          "DELETE FROM admin_audit WHERE id = ?1 RETURNING id"
+        ],
+        "exists": "SELECT id FROM admin_audit WHERE id = ?1",
+        "insert": "INSERT INTO admin_audit (at, action, target) SELECT ?1, ?2, ?3 WHERE (SELECT count(*) FROM admin_audit) < ?4 RETURNING id",
+        "list": "SELECT id, at, action, target FROM admin_audit WHERE (?1 IS NULL OR id < ?1) ORDER BY id DESC LIMIT ?2",
+        "update": "UPDATE admin_audit SET at = ?2, action = ?3, target = ?4 WHERE id = ?1 RETURNING id"
+      }
+    },
+    "bookmarks": {
+      "columns": [
+        {
+          "kind": "text",
+          "max": 80,
+          "min": 1,
+          "name": "label",
+          "nullable": false
+        },
+        {
+          "kind": "url",
+          "max": null,
+          "min": null,
+          "name": "url",
+          "nullable": false
+        },
+        {
+          "kind": "int",
+          "max": 1000000,
+          "min": -1000000,
+          "name": "sort_order",
+          "nullable": false
+        }
+      ],
+      "editable": true,
+      "key": "id",
+      "key_given": false,
+      "max_rows": 50,
+      "paged": false,
+      "sql": {
+        "delete": [
+          "DELETE FROM bookmarks WHERE id = ?1 RETURNING id"
+        ],
+        "exists": "SELECT id FROM bookmarks WHERE id = ?1",
+        "insert": "INSERT INTO bookmarks (label, url, sort_order) SELECT ?1, ?2, ?3 WHERE (SELECT count(*) FROM bookmarks) < ?4 RETURNING id",
+        "list": "SELECT id, label, url, sort_order FROM bookmarks WHERE (?1 IS NULL OR id < ?1) ORDER BY sort_order, id LIMIT ?2",
+        "update": "UPDATE bookmarks SET label = ?2, url = ?3, sort_order = ?4 WHERE id = ?1 RETURNING id"
+      }
+    },
+    "chat_messages": {
+      "columns": [
+        {
+          "kind": "text",
+          "max": 64,
+          "min": 1,
+          "name": "username",
+          "nullable": false
+        },
+        {
+          "kind": "url",
+          "max": null,
+          "min": null,
+          "name": "url",
+          "nullable": true
+        },
+        {
+          "kind": "text",
+          "max": 4000,
+          "min": 1,
+          "name": "message",
+          "nullable": false
+        },
+        {
+          "kind": "timestamp",
+          "max": null,
+          "min": null,
+          "name": "created_at",
+          "nullable": false
+        },
+        {
+          "kind": "timestamp",
+          "max": null,
+          "min": null,
+          "name": "deleted_at",
+          "nullable": true
+        }
+      ],
+      "editable": false,
+      "key": "id",
+      "key_given": false,
+      "max_rows": 0,
+      "paged": true,
+      "sql": {
+        "delete": [
+          "DELETE FROM chat_messages WHERE id = ?1 RETURNING id"
+        ],
+        "exists": "SELECT id FROM chat_messages WHERE id = ?1",
+        "insert": "INSERT INTO chat_messages (username, url, message, created_at, deleted_at) SELECT ?1, ?2, ?3, ?4, ?5 WHERE (SELECT count(*) FROM chat_messages) < ?6 RETURNING id",
+        "list": "SELECT id, username, url, message, created_at, deleted_at FROM chat_messages WHERE (?1 IS NULL OR id < ?1) ORDER BY id DESC LIMIT ?2",
+        "update": "UPDATE chat_messages SET username = ?2, url = ?3, message = ?4, created_at = ?5, deleted_at = ?6 WHERE id = ?1 RETURNING id"
+      }
+    },
+    "embience_presets": {
+      "columns": [
+        {
+          "kind": "text",
+          "max": 40,
+          "min": 1,
+          "name": "label",
+          "nullable": false
+        },
+        {
+          "kind": "int",
+          "max": 1000000,
+          "min": -1000000,
+          "name": "sort_order",
+          "nullable": false
+        }
+      ],
+      "editable": true,
+      "key": "id",
+      "key_given": false,
+      "max_rows": 30,
+      "paged": false,
+      "sql": {
+        "delete": [
+          "DELETE FROM embience_preset_items WHERE preset_id = ?1",
+          "DELETE FROM embience_presets WHERE id = ?1 RETURNING id"
+        ],
+        "exists": "SELECT id FROM embience_presets WHERE id = ?1",
+        "insert": "INSERT INTO embience_presets (label, sort_order) SELECT ?1, ?2 WHERE (SELECT count(*) FROM embience_presets) < ?3 RETURNING id",
+        "list": "SELECT id, label, sort_order FROM embience_presets WHERE (?1 IS NULL OR id < ?1) ORDER BY sort_order, id LIMIT ?2",
+        "update": "UPDATE embience_presets SET label = ?2, sort_order = ?3 WHERE id = ?1 RETURNING id"
+      }
+    },
+    "embiences": {
+      "columns": [
+        {
+          "kind": "text",
+          "max": 40,
+          "min": 1,
+          "name": "name",
+          "nullable": false
+        },
+        {
+          "kind": "url",
+          "max": null,
+          "min": null,
+          "name": "icon_url",
+          "nullable": false
+        },
+        {
+          "kind": "url",
+          "max": null,
+          "min": null,
+          "name": "stream_url",
+          "nullable": false
+        },
+        {
+          "kind": "int",
+          "max": 1000000,
+          "min": -1000000,
+          "name": "sort_order",
+          "nullable": false
+        }
+      ],
+      "editable": true,
+      "key": "id",
+      "key_given": false,
+      "max_rows": 60,
+      "paged": false,
+      "sql": {
+        "delete": [
+          "DELETE FROM embience_preset_items WHERE embience_id = ?1",
+          "DELETE FROM embiences WHERE id = ?1 RETURNING id"
+        ],
+        "exists": "SELECT id FROM embiences WHERE id = ?1",
+        "insert": "INSERT INTO embiences (name, icon_url, stream_url, sort_order) SELECT ?1, ?2, ?3, ?4 WHERE (SELECT count(*) FROM embiences) < ?5 RETURNING id",
+        "list": "SELECT id, name, icon_url, stream_url, sort_order FROM embiences WHERE (?1 IS NULL OR id < ?1) ORDER BY sort_order, id LIMIT ?2",
+        "update": "UPDATE embiences SET name = ?2, icon_url = ?3, stream_url = ?4, sort_order = ?5 WHERE id = ?1 RETURNING id"
+      }
+    },
+    "generations": {
+      "columns": [
+        {
+          "kind": "text",
+          "max": 80,
+          "min": 1,
+          "name": "label",
+          "nullable": false
+        },
+        {
+          "kind": "route",
+          "max": null,
+          "min": null,
+          "name": "link",
+          "nullable": false
+        },
+        {
+          "kind": "text",
+          "max": 32,
+          "min": 1,
+          "name": "kernel",
+          "nullable": false
+        },
+        {
+          "kind": "date",
+          "max": null,
+          "min": null,
+          "name": "built_on",
+          "nullable": false
+        }
+      ],
+      "editable": true,
+      "key": "number",
+      "key_given": true,
+      "max_rows": 20,
+      "paged": false,
+      "sql": {
+        "delete": [
+          "DELETE FROM generations WHERE number = ?1 RETURNING number"
+        ],
+        "exists": "SELECT number FROM generations WHERE number = ?1",
+        "insert": "INSERT INTO generations (number, label, link, kernel, built_on) SELECT ?1, ?2, ?3, ?4, ?5 WHERE (SELECT count(*) FROM generations) < ?6 RETURNING number",
+        "list": "SELECT number, label, link, kernel, built_on FROM generations WHERE (?1 IS NULL OR number < ?1) ORDER BY number DESC LIMIT ?2",
+        "update": "UPDATE generations SET label = ?2, link = ?3, kernel = ?4, built_on = ?5 WHERE number = ?1 RETURNING number"
+      }
+    },
+    "journal_pinned_repos": {
+      "columns": [
+        {
+          "kind": "int",
+          "max": 1000000,
+          "min": -1000000,
+          "name": "position",
+          "nullable": false
+        },
+        {
+          "kind": "text",
+          "max": 100,
+          "min": 1,
+          "name": "repo_name",
+          "nullable": false
+        },
+        {
+          "kind": "text",
+          "max": 60,
+          "min": 1,
+          "name": "topic",
+          "nullable": true
+        }
+      ],
+      "editable": false,
+      "key": "id",
+      "key_given": false,
+      "max_rows": 0,
+      "paged": false,
+      "sql": {
+        "delete": [
+          "DELETE FROM journal_pinned_repos WHERE id = ?1 RETURNING id"
+        ],
+        "exists": "SELECT id FROM journal_pinned_repos WHERE id = ?1",
+        "insert": "INSERT INTO journal_pinned_repos (position, repo_name, topic) SELECT ?1, ?2, ?3 WHERE (SELECT count(*) FROM journal_pinned_repos) < ?4 RETURNING id",
+        "list": "SELECT id, position, repo_name, topic FROM journal_pinned_repos WHERE (?1 IS NULL OR id < ?1) ORDER BY position, id LIMIT ?2",
+        "update": "UPDATE journal_pinned_repos SET position = ?2, repo_name = ?3, topic = ?4 WHERE id = ?1 RETURNING id"
+      }
+    },
+    "journal_stack": {
+      "columns": [
+        {
+          "kind": "int",
+          "max": 1000000,
+          "min": -1000000,
+          "name": "position",
+          "nullable": false
+        },
+        {
+          "kind": "text",
+          "max": 40,
+          "min": 1,
+          "name": "name",
+          "nullable": false
+        }
+      ],
+      "editable": false,
+      "key": "id",
+      "key_given": false,
+      "max_rows": 0,
+      "paged": false,
+      "sql": {
+        "delete": [
+          "DELETE FROM journal_stack WHERE id = ?1 RETURNING id"
+        ],
+        "exists": "SELECT id FROM journal_stack WHERE id = ?1",
+        "insert": "INSERT INTO journal_stack (position, name) SELECT ?1, ?2 WHERE (SELECT count(*) FROM journal_stack) < ?3 RETURNING id",
+        "list": "SELECT id, position, name FROM journal_stack WHERE (?1 IS NULL OR id < ?1) ORDER BY position, id LIMIT ?2",
+        "update": "UPDATE journal_stack SET position = ?2, name = ?3 WHERE id = ?1 RETURNING id"
+      }
+    },
+    "radio_stations": {
+      "columns": [
+        {
+          "kind": "text",
+          "max": 80,
+          "min": 1,
+          "name": "label",
+          "nullable": false
+        },
+        {
+          "kind": "text",
+          "max": 160,
+          "min": 0,
+          "name": "slogan",
+          "nullable": false
+        },
+        {
+          "kind": "url",
+          "max": null,
+          "min": null,
+          "name": "stream_url",
+          "nullable": false
+        },
+        {
+          "kind": "url",
+          "max": null,
+          "min": null,
+          "name": "official_link",
+          "nullable": true
+        },
+        {
+          "kind": "url",
+          "max": null,
+          "min": null,
+          "name": "image_url",
+          "nullable": true
+        },
+        {
+          "kind": "int",
+          "max": 1000000,
+          "min": -1000000,
+          "name": "sort_order",
+          "nullable": false
+        },
+        {
+          "kind": "bool",
+          "max": null,
+          "min": null,
+          "name": "is_active",
+          "nullable": false
+        }
+      ],
+      "editable": true,
+      "key": "id",
+      "key_given": false,
+      "max_rows": 60,
+      "paged": false,
+      "sql": {
+        "delete": [
+          "DELETE FROM radio_stations WHERE id = ?1 RETURNING id"
+        ],
+        "exists": "SELECT id FROM radio_stations WHERE id = ?1",
+        "insert": "INSERT INTO radio_stations (label, slogan, stream_url, official_link, image_url, sort_order, is_active) SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7 WHERE (SELECT count(*) FROM radio_stations) < ?8 RETURNING id",
+        "list": "SELECT id, label, slogan, stream_url, official_link, image_url, sort_order, is_active FROM radio_stations WHERE (?1 IS NULL OR id < ?1) ORDER BY sort_order, id LIMIT ?2",
+        "update": "UPDATE radio_stations SET label = ?2, slogan = ?3, stream_url = ?4, official_link = ?5, image_url = ?6, sort_order = ?7, is_active = ?8 WHERE id = ?1 RETURNING id"
+      }
+    }
+  }
+}

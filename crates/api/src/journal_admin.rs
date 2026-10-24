@@ -9,11 +9,11 @@
 
 use api_types::journal::{clean_text, is_repo_name, limits};
 use serde::{Deserialize, Serialize};
-use turso_http::{Client, Error, Stmt, Transport, Value};
+use turso_http::{Client, Stmt, Transport, Value};
 
 use crate::content;
 use crate::journal::is_github_username;
-use crate::panel::PanelError;
+use crate::panel::{write_error, PanelError};
 use crate::time::format_utc;
 
 const PROFILE: &str = include_str!("queries/journal_profile.sql");
@@ -109,22 +109,6 @@ pub enum List {
 }
 
 // ------------------------------------------------------------------ pemeriksaan
-
-/// Pelanggaran UNIQUE (nama kembar) -> `Conflict`; selain itu galat database.
-fn write_error(e: Error) -> PanelError {
-    let unique = match &e {
-        Error::Sql { message, code } | Error::Step { message, code, .. } => {
-            message.contains("UNIQUE constraint failed")
-                || code.as_deref().is_some_and(|c| c.contains("UNIQUE"))
-        }
-        _ => false,
-    };
-    if unique {
-        PanelError::Conflict
-    } else {
-        PanelError::Db(e)
-    }
-}
 
 pub fn check_username(raw: &str) -> Result<String, PanelError> {
     let name = raw.trim();
